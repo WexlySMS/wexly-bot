@@ -397,7 +397,7 @@ module.exports = {
   sendPostVisitEmail
 }
 
-async function sendCustomerConfirmationEmail({ customerEmail, customerName, businessName, serviceName, appointmentDate, appointmentTime, smsNumber, depositUrl }) {
+async function sendCustomerConfirmationEmail({ customerEmail, customerName, businessName, serviceName, appointmentDate, appointmentTime, smsNumber, depositUrl, pending = false }) {
   if (!customerEmail) return
   const firstName = (customerName || 'there').split(' ')[0]
   const dateFormatted = new Date(appointmentDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
@@ -419,8 +419,8 @@ async function sendCustomerConfirmationEmail({ customerEmail, customerName, busi
         <h1 style="margin:0;font-size:20px;color:#fff;">${businessName}</h1>
       </td></tr>
       <tr><td style="padding:30px;background:#ffffff;">
-        <h2 style="margin:0 0 8px;font-size:22px;color:#111;">Booking Confirmed ✅</h2>
-        <p style="margin:0 0 20px;font-size:15px;color:#555;">Hi ${firstName}! Your appointment is all set.</p>
+        <h2 style="margin:0 0 8px;font-size:22px;color:#111;">${pending ? 'Request received' : 'You are booked'}</h2>
+        <p style="margin:0 0 20px;font-size:15px;color:#555;">Hi ${firstName}, ${pending ? `${businessName} has your request and will confirm by text shortly.` : 'your appointment is set.'}</p>
         <table cellpadding="0" cellspacing="0" border="0" style="width:100%;background:#F9FAFB;border-radius:8px;padding:4px;">
           <tr><td style="padding:12px 16px;border-bottom:1px solid #eee;"><strong style="color:#333;">Service</strong></td><td style="padding:12px 16px;border-bottom:1px solid #eee;color:#555;">${serviceName}</td></tr>
           <tr><td style="padding:12px 16px;border-bottom:1px solid #eee;"><strong style="color:#333;">Date</strong></td><td style="padding:12px 16px;border-bottom:1px solid #eee;color:#555;">${dateFormatted}</td></tr>
@@ -429,17 +429,17 @@ async function sendCustomerConfirmationEmail({ customerEmail, customerName, busi
       </td></tr>
       ${depositSection}
       <tr><td style="padding:20px 30px;background:#ffffff;">
-        <p style="margin:0;font-size:13px;color:#888;">Need to reschedule or cancel? Just text us at ${smsNumber || 'our number'}.</p>
+        <p style="margin:0;font-size:14px;color:#444;">${smsNumber ? `<strong>${smsNumber}</strong> is ${businessName}'s number. Save it and text there any time to move or cancel this appointment or ask a question.` : `Text ${businessName} any time to move or cancel this appointment.`}</p>
       </td></tr>
       <tr><td style="padding:20px 30px;background:#F3F2EE;border-radius:0 0 8px 8px;text-align:center;">
-        <p style="margin:0;font-size:12px;color:#999;">Powered by Wexly — booking by text</p>
+        <p style="margin:0;font-size:12px;color:#999;">Powered by Wexly, booking by text</p>
       </td></tr>
     </table>`
 
   await sendEmail({
     to: customerEmail,
     from: 'bookings@getwexly.com',
-    subject: `Booking Confirmed — ${serviceName} on ${dateFormatted}`,
+    subject: pending ? `Request received: ${serviceName} on ${dateFormatted}` : `You're booked: ${serviceName} on ${dateFormatted}`,
     html
   })
   console.log(`[Email] Sent booking confirmation to ${customerEmail}`)

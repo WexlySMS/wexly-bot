@@ -2780,12 +2780,24 @@ app.post('/public/book/:slug', async (req, res) => {
     if (biz.sms_number && normalizedPhone) {
       const { sendSMS } = require('./src/utils/sms')
       const { formatDate, formatTime } = require('./src/utils/dateHelpers')
+      // v203: the confirmation makes clear this is the business's own number
+      // and that replying here works (move, cancel, ask). It used to read like
+      // a no-reply alert.
+      const firstName = String(customer_name).trim().split(/\s+/)[0]
       const confirmMsg = service.booking_mode === 'request'
-        ? `Hi ${customer_name}! Your appointment request for ${service.name} on ${formatDate(date)} at ${formatTime(time)} has been received. We'll confirm shortly!`
-        : `Hi ${customer_name}! You're booked for ${service.name} on ${formatDate(date)} at ${formatTime(time)}${staffName ? ` with ${staffName}` : ''}. See you then! Reply STOP to opt out.`
+        ? `Hi ${firstName}, this is ${biz.business_name}. We got your request for ${service.name} on ${formatDate(date)} at ${formatTime(time)} and will confirm here shortly. Text this number any time with questions. Reply STOP to opt out.`
+        : `Hi ${firstName}, this is ${biz.business_name}. You're booked for ${service.name} on ${formatDate(date)} at ${formatTime(time)}${staffName ? ` with ${staffName}` : ''}. Save this number: text here any time to move it, cancel, or ask a question. Reply STOP to opt out.`
 
       sendSMS(biz.sms_number, normalizedPhone, confirmMsg)
         .catch(err => console.error('[Online Booking] SMS confirmation failed:', err.message))
+
+      // v203: email confirmation too, when they gave one (the text flow already did this).
+      if (email) {
+        const { sendCustomerConfirmationEmail } = require('./src/utils/emailService')
+        const { formatPhone } = require('./src/bot/trialOnboarding')
+        sendCustomerConfirmationEmail({ customerEmail: email, customerName: customer_name, businessName: biz.business_name, serviceName: service.name, appointmentDate: date, appointmentTime: formatTime(time), smsNumber: formatPhone(biz.sms_number), pending: service.booking_mode === 'request' })
+          .catch(err => console.error('[Online Booking] email confirmation failed:', err.message))
+      }
 
       // Send deposit link if service requires one and Stripe is connected
       if (service.deposit_amount && biz.stripe_account_connected && biz.stripe_account_id && appt?.id) {
