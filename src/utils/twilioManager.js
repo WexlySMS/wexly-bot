@@ -21,7 +21,13 @@ const POOL_MIN         = parseInt(process.env.NUMBER_POOL_MIN || '5', 10)
 const POOL_MAX         = parseInt(process.env.NUMBER_POOL_MAX || '12', 10)
 const POOL_MIN_AGE_H   = parseFloat(process.env.NUMBER_POOL_MIN_AGE_HOURS || '12')
 const QUARANTINE_DAYS  = parseInt(process.env.NUMBER_POOL_QUARANTINE_DAYS || '30', 10)
-const SHARED_NUMBER    = process.env.TWILIO_PHONE_NUMBER || null
+const digits = (n) => String(n || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '')
+const SHARED_NUMBER    = digits(process.env.TWILIO_PHONE_NUMBER)
+// Numbers the pool must never touch: the shared number, anything listed in
+// NUMBER_POOL_EXCLUDE (comma separated), and toll-free (needs its own verification).
+const EXCLUDED = new Set([SHARED_NUMBER, ...String(process.env.NUMBER_POOL_EXCLUDE || '').split(',').map(digits)].filter(Boolean))
+const isTollFree = (n) => /^(800|833|844|855|866|877|888)/.test(digits(n))
+const isExcluded = (n) => EXCLUDED.has(digits(n)) || isTollFree(n)
 
 const hoursAgo = (iso) => iso ? (Date.now() - new Date(iso).getTime()) / 36e5 : 0
 
@@ -86,6 +92,7 @@ async function poolAvailable() {
 
 // Pick the best idle number: same area code if one is old enough, else the oldest.
 function pickFromPool(list, areaCode) {
+  list = list.filter(n => !isExcluded(n.phone_number))
   if (!list.length) return null
   const aged = list.filter(n => hoursAgo(n.purchased_at) >= POOL_MIN_AGE_H)
   const candidates = aged.length ? aged : list
@@ -143,7 +150,7 @@ async function importOrphanedNumbers() {
     if (poolErr) { console.error('[Pool] number_pool table not readable, skipping import (run the migration):', poolErr.message); out.error = poolErr.message; return out }
     const inPool = new Set((pooled || []).map(p => p.phone_number))
     for (const n of numbers) {
-      if (n.phoneNumber === SHARED_NUMBER) { out.skipped.push(`${n.phoneNumber} (shared)`); continue }
+      if (isExcluded(n.phoneNumber)) { out.skipped.push(`${n.phoneNumber} (${isTollFree(n.phoneNumber) ? 'toll-free' : 'excluded'})`); continue }
       if (!n.capabilities?.sms) { out.skipped.push(`${n.phoneNumber} (no sms)`); continue }
       if (live.has(n.phoneNumber)) { out.skipped.push(`${n.phoneNumber} (in use)`); continue }
       if (inPool.has(n.phoneNumber)) { out.skipped.push(`${n.phoneNumber} (already pooled)`); continue }
