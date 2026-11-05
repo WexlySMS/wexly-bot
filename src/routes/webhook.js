@@ -415,9 +415,13 @@ router.post('/sms', validateTwilio, async (req, res) => {
         const ob = business.onboarding || {}
         const looksLikeSource = /https?:\/\/|\.(com|net|co|io|app|biz|salon|beauty)\b/i.test(incomingText) || (mediaUrls && mediaUrls.length)
         if (ob.setup_requested_at && !ob.setup_source_at && looksLikeSource) {
-          const { recordSetupSource, setupSourceAck } = require('../bot/trialOnboarding')
-          await sendSMS(toNumber, customerPhone, setupSourceAck(business))
+          const { recordSetupSource, setupSourceAck, runAutoImport } = require('../bot/trialOnboarding')
+          const { normalizeUrl } = require('../utils/siteImporter')
+          const srcUrl = normalizeUrl((incomingText.match(/https?:\/\/\S+|\b[a-z0-9.-]+\.(?:com|net|co|io|app|biz|salon|beauty)\b\S*/i) || [])[0])
+          await sendSMS(toNumber, customerPhone, srcUrl ? `Got it, reading your page now. Give me a minute.` : setupSourceAck(business))
           recordSetupSource(business, incomingText, mediaUrls).catch(e => console.error('[Owner] setup source record failed:', e.message))
+          // v203: a link gets imported on the spot; if nothing usable comes back, fall back to the human ack.
+          if (srcUrl) runAutoImport(business, srcUrl).then(r => { if (!r) return sendSMS(toNumber, customerPhone, setupSourceAck(business)) }).catch(e => { console.error('[Owner] auto-import failed:', e.message); sendSMS(toNumber, customerPhone, setupSourceAck(business)).catch(() => {}) })
           return
         }
       }

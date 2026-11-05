@@ -297,6 +297,31 @@ async function recordSetupSource(biz, text, mediaUrls) {
   console.log(`[Setup] ${who} sent setup source: ${url || media.length + ' media'}`)
 }
 
+// v203: when the setup source is a link, build the account from it right
+// away. The owner gets a summary and a YES/fix prompt; Brandon still gets the
+// email so a human can double-check. Photos of a menu still go the human route.
+async function runAutoImport(biz, url) {
+  const { importFromUrl, applyImport } = require('../utils/siteImporter')
+  const data = await importFromUrl(url)
+  if (data.error || !data.services || !data.services.length) {
+    console.log(`[Setup] auto-import found nothing usable for ${biz.business_name}: ${data.error || 'no services'}`)
+    return null
+  }
+  const result = await applyImport(biz.id, data)
+  const { data: fresh } = await supabase.from('businesses').select('profile_slug').eq('id', biz.id).maybeSingle()
+  const names = [...result.services.added, ...result.services.updated]
+  const list = names.slice(0, 3).join(', ') + (names.length > 3 ? ` and ${names.length - 3} more` : '')
+  const bits = [`${names.length} service${names.length === 1 ? '' : 's'} (${list})`]
+  if (result.hours) bits.push('your hours')
+  if (result.photos) bits.push(`${result.photos} photos`)
+  const page = fresh?.profile_slug ? `${SITE_URL}/book/${fresh.profile_slug}` : null
+  const msg = `Done. I loaded ${bits.join(', ')} from your page.` + (page ? ` Your new booking page is live: ${page}` : '') +
+    ` Reply YES if it all looks right, or tell me what to change (for example "make Balayage $240" or "we close at 6 on Fridays").`
+  await sendSMS(biz.sms_number, biz.owner_phone, msg)
+  await markStep(biz.id, biz.onboarding, 'auto_import_at', { auto_import: { url, services: names.length, hours: result.hours, photos: result.photos } })
+  return result
+}
+
 function setupSourceAck(biz) {
   return `Got it. We'll set everything up from that and text you here when it's done, usually within a few hours. ` +
     `Anything you want handled differently from what's on there, just tell me.`
@@ -468,6 +493,6 @@ async function runTrialOnboardingDrip() {
 module.exports = {
   normalizeUSPhone, formatPhone,
   sendVerificationCode, verifyCode, isRecentlyVerified, phoneAlreadyUsedTrial,
-  lineTypeCheck, activateInstantTrial, sendTrialWelcome, ensureProfileSlug, profileUrl, setupOfferReply, recordSetupRequest, recordSetupSource, setupSourceAck, expiredOwnerReply,
+  lineTypeCheck, activateInstantTrial, sendTrialWelcome, ensureProfileSlug, profileUrl, runAutoImport, setupOfferReply, recordSetupRequest, recordSetupSource, setupSourceAck, expiredOwnerReply,
   runTrialOnboardingDrip, addCardLink, TRIAL_DAYS
 }

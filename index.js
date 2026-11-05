@@ -1054,6 +1054,28 @@ app.post('/admin/pool/import', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
+// Import from a link (v203, Entry 72). Preview is read-only; apply writes.
+app.post('/admin/business/:id/import', async (req, res) => {
+  const id = adminBiz(req, res); if (!id) return
+  const url = String(req.body.url || '').trim()
+  if (!url) return res.status(400).json({ error: 'Paste their booking page or website URL' })
+  try {
+    const { importFromUrl } = require('./src/utils/siteImporter')
+    const data = await importFromUrl(url)
+    if (data.error) return res.status(422).json({ error: data.error })
+    res.json(data)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+app.post('/admin/business/:id/import/apply', async (req, res) => {
+  const id = adminBiz(req, res); if (!id) return
+  const data = req.body.data, options = req.body.options || {}
+  if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Nothing to apply' })
+  try {
+    const { applyImport } = require('./src/utils/siteImporter')
+    res.json({ success: true, result: await applyImport(id, data, options) })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
 // Image upload for the booking page (v203): cover, logo, or work photo.
 // Body: { kind: 'cover'|'logo'|'photo', contentType, data (base64) }. Stored in
 // the public profile-photos bucket under the business id; returns the URL.
@@ -3610,7 +3632,7 @@ app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════╗
   ║   Wexly SMS Bot v2.0                 ║
-  ║   BUILD: v202 (pool, booking page)   ║
+  ║   BUILD: v203 (import, db proxy)     ║
   ║   Running on port ${PORT}               ║
   ║                                      ║
   ║   SMS:    POST /webhook/sms          ║

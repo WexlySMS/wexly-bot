@@ -1,0 +1,239 @@
+// ── Site importer (v203, Entry 72) ────────────────────────────────────────────
+// Turns an existing booking page or website (GlossGenius, Booksy, StyleSeat,
+// Square, Squarespace, Wix, anything server-rendered) into Wexly data:
+// services, hours, address, bio, photos, logo, social links. Two steps so a
+// human (or the owner by text) can check before anything is written:
+//   importFromUrl(url)              → { ...extracted, warnings[] }   (no writes)
+//   applyImport(businessId, data)   → writes services/hours/profile, re-hosts photos
+const Anthropic = require('@anthropic-ai/sdk')
+const { createClient } = require('@supabase/supabase-js')
+require('dotenv').config()
+
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+const MODEL = process.env.IMPORT_MODEL || 'claude-sonnet-4-6'
+const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+const FETCH_MS = 20000
+const MAX_HTML = 3 * 1024 * 1024
+const MAX_TEXT = 60000
+const MAX_BLOBS = 80000
+
+function normalizeUrl(raw) {
+  let u = String(raw || '').trim()
+  if (!u) return null
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u
+  try { const x = new URL(u); if (!/\./.test(x.hostname)) return null; return x.toString() } catch { return null }
+}
+
+async function fetchText(url, { timeoutMs = FETCH_MS, maxBytes = MAX_HTML, accept = 'text/html,application/xhtml+xml' } = {}) {
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), timeoutMs)
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: accept, 'Accept-Language': 'en-US,en;q=0.9' }, redirect: 'follow', signal: ctl.signal })
+    const ct = r.headers.get('content-type') || ''
+    const buf = Buffer.from(await r.arrayBuffer())
+    return { ok: r.ok, status: r.status, contentType: ct, finalUrl: r.url, body: buf.subarray(0, maxBytes).toString('utf8'), bytes: buf.length }
+  } finally { clearTimeout(t) }
+}
+
+const decode = (s) => String(s || '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&nbsp;/g, ' ').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
+const abs = (base, href) => { try { return new URL(href, base).toString() } catch { return null } }
+
+// Pull the parts of a page a model can reason over: JSON-LD, framework state
+// blobs, meta tags, candidate images, and the visible text.
+function dissect(html, baseUrl) {
+  const out = { jsonld: [], blobs: [], meta: {}, images: [], text: '' }
+  for (const m of html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try { out.jsonld.push(JSON.parse(m[1].trim())) } catch { /* ignore */ }
+  }
+  for (const m of html.matchAll(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/gi)) out.blobs.push(m[1])
+  for (const m of html.matchAll(/window\.(?:__NUXT__|__INITIAL_STATE__|__PRELOADED_STATE__|__APOLLO_STATE__)\s*=\s*([\s\S]*?);\s*<\/script>/gi)) out.blobs.push(m[1])
+  for (const m of html.matchAll(/<meta[^>]+(?:property|name)=["']([^"']+)["'][^>]+content=["']([^"']*)["']/gi)) out.meta[m[1].toLowerCase()] = decode(m[2])
+  for (const m of html.matchAll(/<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']([^"']+)["']/gi)) out.meta[m[2].toLowerCase()] = decode(m[1])
+  const seen = new Set()
+  const pushImg = (src, hint) => { const u = abs(baseUrl, decode(src)); if (!u || seen.has(u) || /\.svg(\?|$)|data:|sprite|pixel|tracking|1x1/i.test(u)) return; seen.add(u); out.images.push({ url: u, hint }) }
+  for (const k of ['og:image', 'og:image:secure_url', 'twitter:image']) if (out.meta[k]) pushImg(out.meta[k], 'og')
+  for (const m of html.matchAll(/<img[^>]*>/gi)) {
+    const tag = m[0]
+    const src = (tag.match(/\s(?:data-src|data-lazy-src|src)=["']([^"']+)["']/i) || [])[1]
+    const srcset = (tag.match(/\s(?:data-srcset|srcset)=["']([^"']+)["']/i) || [])[1]
+    const best = srcset ? srcset.split(',').map(s => s.trim().split(/\s+/)[0]).filter(Boolean).pop() : null
+    const alt = decode((tag.match(/\salt=["']([^"']*)["']/i) || [])[1] || '')
+    const w = parseInt((tag.match(/\swidth=["']?(\d+)/i) || [])[1] || '0', 10)
+    if (w && w < 120) continue
+    if (best || src) pushImg(best || src, /logo/i.test(alt + tag) ? 'logo' : alt.slice(0, 60))
+    if (out.images.length >= 60) break
+  }
+  for (const m of html.matchAll(/background(?:-image)?:\s*url\((['"]?)([^'")]+)\1\)/gi)) { pushImg(m[2], 'bg'); if (out.images.length >= 80) break }
+  let t = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+  t = t.replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/tr|\/section|\/article)[^>]*>/gi, '\n').replace(/<[^>]+>/g, ' ')
+  t = decode(t).replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
+  out.text = t.slice(0, MAX_TEXT)
+  return out
+}
+
+// Extraction schema. Everything optional; the model must not invent.
+const TOOL = {
+  name: 'save_import',
+  description: 'Record the business data found on the page. Only include values actually present on the page. Never invent prices, durations, hours or addresses.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: 'Business name as written' },
+      business_type: { type: 'string', enum: ['salon', 'barbershop', 'spa', 'nails', 'medical', 'gym', 'other'], description: 'Closest type. Med spa / aesthetics / injectables = medical. Lashes, brows, waxing, skin = spa.' },
+      tagline: { type: 'string', description: 'One line, under 140 chars, in the business voice. From the page if it has one; otherwise a plain factual line like "Color and blowouts in Venice". No marketing fluff.' },
+      about: { type: 'string', description: 'The about/bio text from the page, lightly cleaned, up to ~800 chars. Omit if the page has none.' },
+      address: { type: 'string', description: 'Street address, one or two lines, as written' },
+      city: { type: 'string' },
+      phone: { type: 'string', description: 'Business phone as written' },
+      hours: { type: 'array', description: 'Seven entries Sun..Sat. Only if hours are on the page.', items: { type: 'object', properties: { day: { type: 'string', enum: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] }, open: { type: 'boolean' }, from: { type: 'string', description: 'HH:MM 24h' }, to: { type: 'string', description: 'HH:MM 24h' } }, required: ['day', 'open'] } },
+      services: { type: 'array', description: 'Every bookable service on the page, in page order. Packages and add-ons included. Skip retail products and gift cards.', items: { type: 'object', properties: {
+        name: { type: 'string' },
+        price: { type: 'string', description: 'Number only, e.g. "65", "180", or "300+" for starting-at. Empty string if not shown. No $ sign.' },
+        duration_mins: { type: 'integer', description: 'Minutes. Omit if not shown.' },
+        description: { type: 'string', description: 'Short description from the page, if any' },
+        category: { type: 'string', description: 'Section heading the service sits under on the page, if any (e.g. Color, Blowouts, Extensions)' },
+        deposit: { type: 'string', description: 'Deposit amount if stated, number only' },
+        by_request: { type: 'boolean', description: 'true if the page says consultation required / price on request' }
+      }, required: ['name'] } },
+      policies: { type: 'string', description: 'Cancellation, deposit, late, no-show policy text from the page, cleaned, up to ~800 chars' },
+      social: { type: 'object', properties: { instagram: { type: 'string', description: 'handle without @ or full URL' }, tiktok: { type: 'string' }, facebook: { type: 'string' }, yelp: { type: 'string' }, google: { type: 'string' }, website: { type: 'string' } } },
+      logo: { type: 'string', description: 'URL from the candidate image list that is the logo, if any' },
+      cover: { type: 'string', description: 'URL from the candidate image list best suited as a full-width cover photo (a salon interior, hero shot, or strong work photo). Not the logo.' },
+      photos: { type: 'array', items: { type: 'string' }, description: 'Up to 12 URLs from the candidate list showing their work or space, best first. Exclude logos, icons, stock badges, payment logos.' },
+      platform: { type: 'string', description: 'Booking platform the page runs on, if recognisable: glossgenius, booksy, square, vagaro, styleseat, fresha, acuity, mangomint, boulevard, squarespace, wix, other' },
+      notes: { type: 'string', description: 'Anything a human should check: ambiguous prices, hours in two places, services that looked like products, etc.' }
+    }
+  }
+}
+
+async function extract(url, parts) {
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+  const candidates = parts.images.slice(0, 60).map((i, n) => `${n + 1}. ${i.url}${i.hint ? `  (${i.hint})` : ''}`).join('\n')
+  const blobs = [...parts.jsonld.map(j => JSON.stringify(j)), ...parts.blobs].join('\n\n').slice(0, MAX_BLOBS)
+  const meta = Object.entries(parts.meta).filter(([k]) => /title|description|og:|twitter:|geo|place/i.test(k)).map(([k, v]) => `${k}: ${v}`).join('\n')
+  const content = `Source URL: ${url}\n\nMETA TAGS:\n${meta || '(none)'}\n\nSTRUCTURED DATA (JSON-LD / framework state, may be truncated):\n${blobs || '(none)'}\n\nCANDIDATE IMAGES:\n${candidates || '(none)'}\n\nVISIBLE PAGE TEXT:\n${parts.text || '(empty)'}`
+  const resp = await client.messages.create({
+    model: MODEL, max_tokens: 6000,
+    system: 'You extract business listing data from a salon, spa, barbershop or similar service business web page into the save_import tool. Be exhaustive on services. Be literal: copy names and prices as shown. Convert durations to minutes ("1 hr 30 min" = 90). Prices like "$150+" or "starting at $150" become "150+". If a value is not on the page, leave it out. Hours: map every day; closed days get open=false. If the page is a booking platform and the text is thin or empty, still return what you can and say so in notes.',
+    tools: [TOOL], tool_choice: { type: 'tool', name: 'save_import' },
+    messages: [{ role: 'user', content }]
+  })
+  const call = resp.content.find(c => c.type === 'tool_use')
+  return call ? call.input : {}
+}
+
+function clean(data, baseUrl) {
+  const d = { ...data }
+  const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+  if (Array.isArray(d.hours) && d.hours.length) {
+    const by = {}; d.hours.forEach(h => { if (h && days.includes(h.day)) by[h.day] = h })
+    d.hours = days.map(day => { const h = by[day] || { open: false }; const open = !!h.open && hhmm.test(h.from || '') && hhmm.test(h.to || ''); return { open, from: open ? h.from : '09:00', to: open ? h.to : '17:00' } })
+    if (!d.hours.some(h => h.open)) delete d.hours
+  } else delete d.hours
+  d.services = (Array.isArray(d.services) ? d.services : []).map(s => ({
+    name: String(s.name || '').trim().slice(0, 80),
+    price: String(s.price || '').replace(/[^\d.+]/g, '').replace(/\.0+$/, '').slice(0, 12),
+    duration_mins: Number.isFinite(+s.duration_mins) && +s.duration_mins > 0 ? Math.min(Math.round(+s.duration_mins), 24 * 60) : null,
+    description: String(s.description || '').trim().slice(0, 300) || null,
+    category: String(s.category || '').trim().slice(0, 60) || null,
+    deposit: String(s.deposit || '').replace(/[^\d.]/g, '').slice(0, 8) || null,
+    by_request: !!s.by_request
+  })).filter(s => s.name)
+  // de-dupe by name
+  const seen = new Set(); d.services = d.services.filter(s => { const k = s.name.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true })
+  for (const k of ['logo', 'cover']) if (d[k]) { d[k] = abs(baseUrl, d[k]); if (!/^https?:/.test(d[k] || '')) delete d[k] }
+  d.photos = (Array.isArray(d.photos) ? d.photos : []).map(u => abs(baseUrl, u)).filter(u => u && /^https?:/.test(u) && u !== d.logo).slice(0, 12)
+  if (d.social && typeof d.social === 'object') { const soc = {}; for (const k of ['instagram', 'tiktok', 'facebook', 'yelp', 'google', 'website']) if (d.social[k]) soc[k] = String(d.social[k]).trim().replace(/^@/, '').slice(0, 200); d.social = soc } else d.social = {}
+  for (const k of ['tagline', 'about', 'address', 'policies', 'name', 'city', 'phone', 'platform', 'notes']) if (d[k] != null) d[k] = String(d[k]).trim().slice(0, k === 'about' || k === 'policies' ? 2000 : 300) || undefined
+  return d
+}
+
+async function importFromUrl(rawUrl) {
+  const url = normalizeUrl(rawUrl)
+  if (!url) return { error: 'That does not look like a web address.' }
+  const warnings = []
+  let page
+  try { page = await fetchText(url) } catch (err) { return { error: `Could not load ${url}: ${err.name === 'AbortError' ? 'timed out' : err.message}` } }
+  if (!page.ok) return { error: `${url} answered ${page.status}.` }
+  if (!/html/i.test(page.contentType)) return { error: `${url} is not a web page (${page.contentType.split(';')[0]}).` }
+  const parts = dissect(page.body, page.finalUrl || url)
+  if (parts.text.length < 200 && !parts.blobs.length && !parts.jsonld.length) warnings.push('The page has almost no readable content; it probably draws everything with JavaScript. Try the services or menu page of their site, or ask for a photo of the menu.')
+  let data
+  try { data = clean(await extract(page.finalUrl || url, parts), page.finalUrl || url) } catch (err) { return { error: `Could not read the page: ${err.message}` } }
+  if (!data.services.length) warnings.push('No services found on this page. If their menu is on another page, import that URL too.')
+  if (!data.hours) warnings.push('No hours found on this page.')
+  if (data.notes) warnings.push(data.notes)
+  console.log(`[Import] ${url}: ${data.services.length} services, hours=${!!data.hours}, photos=${data.photos.length}, platform=${data.platform || '?'}`)
+  return { source: page.finalUrl || url, bytes: page.bytes, ...data, warnings }
+}
+
+// ── Apply ─────────────────────────────────────────────────────────────────────
+async function rehost(businessId, url, kind) {
+  try {
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 15000)
+    const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'image/*' }, signal: ctl.signal }); clearTimeout(t)
+    const ct = (r.headers.get('content-type') || '').split(';')[0]
+    if (!r.ok || !/^image\/(jpeg|png|webp|gif)$/.test(ct)) return null
+    const buf = Buffer.from(await r.arrayBuffer())
+    if (!buf.length || buf.length > 8 * 1024 * 1024) return null
+    const path = `${businessId}/${kind}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ct.split('/')[1].replace('jpeg', 'jpg')}`
+    const { error } = await supabase.storage.from('profile-photos').upload(path, buf, { contentType: ct, cacheControl: '31536000', upsert: false })
+    if (error) return null
+    return supabase.storage.from('profile-photos').getPublicUrl(path).data.publicUrl
+  } catch { return null }
+}
+
+// options: { services, hours, profile, photos } booleans (default all true);
+// serviceNames: optional allow-list of service names to write.
+async function applyImport(businessId, data, options = {}) {
+  const opt = { services: true, hours: true, profile: true, photos: true, ...options }
+  const result = { services: { added: [], updated: [] }, hours: false, profile: [], photos: 0, logo: false, cover: false }
+  const { data: biz } = await supabase.from('businesses').select('id, business_name, hours, profile_description, profile_about, profile_policies, address, logo_url, profile_cover_url, profile_social, profile_photos, business_type, timezone, profile_slug').eq('id', businessId).maybeSingle()
+  if (!biz) throw new Error('Business not found')
+
+  if (opt.services && Array.isArray(data.services) && data.services.length) {
+    const allow = Array.isArray(options.serviceNames) ? new Set(options.serviceNames.map(n => n.toLowerCase())) : null
+    const { data: existing } = await supabase.from('services').select('id, name, sort_order').eq('business_id', businessId).neq('active', false)
+    const byName = {}; (existing || []).forEach(x => { byName[x.name.trim().toLowerCase()] = x })
+    let order = (existing || []).reduce((m, x) => Math.max(m, x.sort_order || 0), -1) + 1
+    for (const s of data.services.slice(0, 80)) {
+      if (allow && !allow.has(s.name.toLowerCase())) continue
+      const priceNum = parseFloat(String(s.price || '').replace('+', ''))
+      const row = { name: s.name, duration_mins: s.duration_mins || 60, description: s.description, category: s.category, booking_mode: s.by_request ? 'approval' : 'instant' }
+      if (s.price) { row.price = s.price; if (Number.isFinite(priceNum)) row.price_cents = Math.round(priceNum * 100) }
+      if (s.deposit) row.deposit_amount = s.deposit
+      const hit = byName[s.name.toLowerCase()]
+      if (hit) { const { error } = await supabase.from('services').update(row).eq('id', hit.id); if (!error) result.services.updated.push(s.name) }
+      else { const { error } = await supabase.from('services').insert({ business_id: businessId, ...row, active: true, sort_order: order++ }); if (!error) result.services.added.push(s.name) }
+    }
+  }
+
+  const upd = {}
+  if (opt.hours && data.hours) { upd.hours = data.hours; result.hours = true }
+  if (opt.profile) {
+    if (data.tagline && !biz.profile_description) { upd.profile_description = data.tagline; result.profile.push('tagline') }
+    if (data.about && !biz.profile_about) { upd.profile_about = data.about; result.profile.push('about') }
+    if (data.policies && !biz.profile_policies) { upd.profile_policies = data.policies; result.profile.push('policies') }
+    if (data.address && !biz.address) { upd.address = data.address; result.profile.push('address') }
+    if (data.social && Object.keys(data.social).length) { upd.profile_social = { ...(biz.profile_social || {}), ...data.social }; result.profile.push('social') }
+    if (data.business_type && (!biz.business_type || biz.business_type === 'other')) { upd.business_type = data.business_type; result.profile.push('type') }
+  }
+  if (opt.photos) {
+    if (data.logo && !biz.logo_url) { const u = await rehost(businessId, data.logo, 'logo'); if (u) { upd.logo_url = u; result.logo = true } }
+    if (data.cover && !biz.profile_cover_url) { const u = await rehost(businessId, data.cover, 'cover'); if (u) { upd.profile_cover_url = u; result.cover = true } }
+    if (Array.isArray(data.photos) && data.photos.length && !(biz.profile_photos || []).length) {
+      const hosted = []
+      for (const p of data.photos.slice(0, 12)) { const u = await rehost(businessId, p, 'work'); if (u) hosted.push(u) }
+      if (hosted.length) { upd.profile_photos = hosted; result.photos = hosted.length }
+    }
+  }
+  if (Object.keys(upd).length) {
+    const { error } = await supabase.from('businesses').update(upd).eq('id', businessId)
+    if (error) throw error
+  }
+  try { await require('../bot/trialOnboarding').ensureProfileSlug(biz) } catch { /* non-fatal */ }
+  console.log(`[Import] applied to ${biz.business_name}: +${result.services.added.length} ~${result.services.updated.length} services, hours=${result.hours}, profile=${result.profile.join('/') || '-'}, photos=${result.photos}`)
+  return result
+}
+
+module.exports = { importFromUrl, applyImport, normalizeUrl }
