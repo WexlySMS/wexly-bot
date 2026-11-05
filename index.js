@@ -61,7 +61,7 @@ app.use('/stripe-connect/webhook', express.raw({ type: 'application/json' }))
 
 // Everything else gets JSON parsing
 app.use(express.urlencoded({ extended: false }))
-app.use(express.json())
+app.use(express.json({ limit: '12mb' }))   // v203: admin image uploads arrive as base64 JSON
 
 // Routes
 app.use('/webhook', webhookRouter)
@@ -995,6 +995,29 @@ app.put('/admin/business/:id/owner-phone', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
+// ── Admin: database proxy (v203) ──────────────────────────────────────────────
+// admin.html used to carry the Supabase service-role key in the page source.
+// Now it sends the same PostgREST-style requests here, authenticated by the
+// admin secret, and only the server holds the key. Whitelisted tables only.
+const ADMIN_DB_TABLES = new Set(['admin_settings', 'businesses', 'services', 'setup_calls', 'referral_credits', 'referral_payouts', 'tracking_pixels', 'number_pool'])
+app.all('/admin/db/:table', async (req, res) => {
+  if (!isValidAdminSecret(req.headers['x-admin-secret'])) return res.status(403).json({ error: 'Forbidden' })
+  const table = String(req.params.table || '')
+  if (!ADMIN_DB_TABLES.has(table)) return res.status(400).json({ error: `Table not allowed: ${table}` })
+  if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(req.method)) return res.status(405).json({ error: 'Method not allowed' })
+  if (req.method === 'DELETE' && !Object.keys(req.query).some(k => !['select', 'order', 'limit', 'offset'].includes(k))) return res.status(400).json({ error: 'DELETE needs a filter' })
+  try {
+    const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : ''
+    const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/${table}${qs}`, {
+      method: req.method,
+      headers: { apikey: process.env.SUPABASE_SERVICE_KEY, Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: req.headers.prefer || 'return=representation' },
+      body: ['POST', 'PATCH'].includes(req.method) ? JSON.stringify(req.body) : undefined
+    })
+    const text = await r.text()
+    res.status(r.status).type('application/json').send(text || '[]')
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
 // ── Admin: warm number pool (v201, Entry 70) ───────────────────────────────────
 app.get('/admin/pool', async (req, res) => {
   if (!isValidAdminSecret(req.headers['x-admin-secret'])) return res.status(403).json({ error: 'Forbidden' })
@@ -1028,6 +1051,28 @@ app.post('/admin/pool/import', async (req, res) => {
     const result = await tm.importOrphanedNumbers()
     tm.maintainNumberPool().catch(() => {})
     res.json(result)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+// Image upload for the booking page (v203): cover, logo, or work photo.
+// Body: { kind: 'cover'|'logo'|'photo', contentType, data (base64) }. Stored in
+// the public profile-photos bucket under the business id; returns the URL.
+app.post('/admin/business/:id/upload', async (req, res) => {
+  const id = adminBiz(req, res); if (!id) return
+  const kind = ['cover', 'logo', 'photo'].includes(req.body.kind) ? req.body.kind : 'photo'
+  const contentType = String(req.body.contentType || '')
+  if (!/^image\/(jpeg|png|webp|gif)$/.test(contentType)) return res.status(400).json({ error: 'Use a JPG, PNG, WebP or GIF' })
+  let buf
+  try { buf = Buffer.from(String(req.body.data || '').replace(/^data:[^,]+,/, ''), 'base64') } catch { return res.status(400).json({ error: 'Bad image data' }) }
+  if (!buf.length || buf.length > 8 * 1024 * 1024) return res.status(400).json({ error: 'Image must be under 8MB' })
+  try {
+    const sb = adminSb()
+    const ext = contentType.split('/')[1].replace('jpeg', 'jpg')
+    const path = `${id}/${kind}_${Date.now()}.${ext}`
+    const { error } = await sb.storage.from('profile-photos').upload(path, buf, { contentType, cacheControl: '3600', upsert: false })
+    if (error) throw error
+    const { data } = sb.storage.from('profile-photos').getPublicUrl(path)
+    res.json({ success: true, url: data.publicUrl })
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
