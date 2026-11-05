@@ -106,17 +106,27 @@ async function parseGlossGenius(html, url) {
   const fb = pu.facebook_url || pu.users[0]?.facebook_url; if (fb) social.facebook = fb
   if (pu.website_url) social.website = pu.website_url
   if (pu.yelp_url) social.yelp = pu.yelp_url
-  let photos = []
+  let photos = [], reviews = null
   if (pu.slug) {
     try { const r = await fetchText(`https://api.glossgenius.com/v3/web/portfolio_images?slug=${encodeURIComponent(pu.slug)}`, { accept: 'application/json', timeoutMs: 10000 }); const j = JSON.parse(r.body); photos = (j.data || []).map(x => x.image?.original || x.image?.medium).filter(Boolean) } catch { /* portfolio optional */ }
+    try { const r = await fetchText(`https://api.glossgenius.com/v3/web/reviews?slug=${encodeURIComponent(pu.slug)}`, { accept: 'application/json', timeoutMs: 10000 }); const j = JSON.parse(r.body)
+      const items = (j.data || []).filter(x => !x.hidden).map(x => ({ name: String(x.reviewer_name || '').trim(), rating: +x.rating || null, text: String(x.message || '').trim(), date: x.created_at ? String(x.created_at).slice(0, 10) : null }))
+      reviews = { source: 'GlossGenius', rating: sc.reviewSummary?.ratingValue ?? null, count: sc.reviewSummary?.reviewCount ?? items.length, items: items.filter(x => x.text).slice(0, 30), names_only: items.filter(x => !x.text).length }
+    } catch { /* reviews optional */ }
   }
+  const prefs = pu.preferences || {}
+  const policyBits = []
+  if (prefs.cancellation_policy) policyBits.push(String(prefs.cancellation_policy).trim())
+  if (prefs.cancellation_window) policyBits.push(`Please give at least ${prefs.cancellation_window} hours notice to cancel or move an appointment.`)
+  if (prefs.cancellation_fee) policyBits.push(`Late cancellations and no-shows may be charged a $${prefs.cancellation_fee} fee.`)
+  const policies = policyBits.join('\n') || null
   const cover = pu.cover_image_original || pu.cover_image_medium || null
   const logo = pu.organization_brand_logo || (pu.users.length === 1 && !pu.users[0].default_avatar ? pu.users[0].avatar_medium : null) || null
   const about = pu.about || pu.users[0]?.about || null
   const notes = []
   if (cover && /stockimage/.test(cover)) notes.push('Cover is a GlossGenius stock image; swap for a real photo if they have one.')
   if (sc.reviewSummary?.reviewCount) notes.push(`${sc.reviewSummary.reviewCount} reviews on GlossGenius (${sc.reviewSummary.ratingValue} stars).`)
-  return { platform: 'glossgenius', name: pu.business_name || loc.name || null, phone: pu.business_phone || loc.contactInfo?.phone || pu.phone || null, address, city: addr?.locality || null, about, hours, services, social, cover, logo, photos, accent: pu.organization_accent_color || null, notes: notes.join(' ') || undefined }
+  return { platform: 'glossgenius', name: pu.business_name || loc.name || null, phone: pu.business_phone || loc.contactInfo?.phone || pu.phone || null, address, city: addr?.locality || null, about, policies, hours, services, social, cover, logo, photos, reviews, accent: pu.organization_accent_color || null, notes: notes.join(' ') || undefined }
 }
 
 // ── Shared helpers for adapters ───────────────────────────────────────────────
@@ -216,7 +226,7 @@ async function parseBooksy(html, url) {
   const photos = [...(img.bizPhoto || []), ...(img.inspiration || [])].map(x => x.image).filter(Boolean)
   const social = { ...socialFromLd(ld) }; if (b.instagramLink) social.instagram = handleOf(b.instagramLink); if (b.facebookLink) social.facebook = b.facebookLink; if (b.website) social.website = b.website
   const notes = []; if (ld?.aggregateRating?.reviewCount) notes.push(`${ld.aggregateRating.reviewCount} reviews on Booksy (${ld.aggregateRating.ratingValue} stars).`)
-  return { platform: 'booksy', name: b.name || ld?.name || null, phone: ld?.telephone || null, address: addressFromLd(ld) || b.location?.address || null, city: b.location?.city || null, about: b.description || null, policies: b.depositPolicy || null, hours, services, social, cover: first('cover') || ld?.image || null, logo: first('logo') || ld?.logo || null, photos, notes: notes.join(' ') || undefined }
+  return { platform: 'booksy', reviews: ld?.aggregateRating?.reviewCount ? { source: 'Booksy', rating: +ld.aggregateRating.ratingValue || null, count: +ld.aggregateRating.reviewCount, items: [] } : null, name: b.name || ld?.name || null, phone: ld?.telephone || null, address: addressFromLd(ld) || b.location?.address || null, city: b.location?.city || null, about: b.description || null, policies: b.depositPolicy || null, hours, services, social, cover: first('cover') || ld?.image || null, logo: first('logo') || ld?.logo || null, photos, notes: notes.join(' ') || undefined }
 }
 
 // ── Fresha: __NEXT_DATA__.props.pageProps.data.location + JSON-LD ─────────────
@@ -236,7 +246,7 @@ async function parseFresha(html, url) {
   if (!hours && loc.workingTime?.days) { hours = emptyWeek(); for (const d of loc.workingTime.days) { const i = DAY_FULL[String(d.dayName).toLowerCase()]; const span = (d.values || [])[0]?.value; if (i == null || d.isClosed || !span) continue; const [a, bb] = span.split(/\s*[-–]\s*/); const from = to24(a), to = to24(bb); if (from && to) hours[i] = { day: DAYS[i], open: true, from, to } } if (!hours.some(h => h.open)) hours = null }
   const photos = [...((loc.portfolioGallery?.edges || []).map(e => e.node?.image?.url)), ...((loc.galleryMobileImages || []).map(x => x.url)), ...((loc.venueSnippetImages || []).map(x => x.url))].filter(Boolean)
   const notes = []; if (ld?.aggregateRating?.reviewCount) notes.push(`${ld.aggregateRating.reviewCount} reviews on Fresha (${ld.aggregateRating.ratingValue} stars).`)
-  return { platform: 'fresha', name: loc.name || ld?.name || null, phone: loc.contactNumber || ld?.telephone || null, address: addressFromLd(ld), about: loc.description || null, hours, services, social: socialFromLd(ld), cover: loc.coverImage?.url || null, logo: loc.venueLogo?.url || null, photos, notes: notes.join(' ') || undefined }
+  return { platform: 'fresha', reviews: ld?.aggregateRating?.reviewCount ? { source: 'Fresha', rating: +ld.aggregateRating.ratingValue || null, count: +ld.aggregateRating.reviewCount, items: [] } : null, name: loc.name || ld?.name || null, phone: loc.contactNumber || ld?.telephone || null, address: addressFromLd(ld), about: loc.description || null, hours, services, social: socialFromLd(ld), cover: loc.coverImage?.url || null, logo: loc.venueLogo?.url || null, photos, notes: notes.join(' ') || undefined }
 }
 
 // ── StyleSeat: public JSON APIs keyed by the vanity slug ──────────────────────
@@ -261,7 +271,7 @@ async function parseStyleSeat(html, url) {
   const social = {}; if (prof.instagram) social.instagram = handleOf(prof.instagram)
   const policies = [prof.cancellation_policy_text, prof.deposit_policy_text].filter(Boolean).join('\n') || null
   const notes = []; if (prof.ratings_count) notes.push(`${prof.ratings_count} reviews on StyleSeat (${prof.rating_stars} stars).`)
-  return { platform: 'styleseat', name: prof.business_name || prof.name || null, phone: prof.public_phone_number || null, address, city: prof.city || null, about: prof.blurb || null, policies, hours, services, social, logo: prof.profile_photo || null, cover: photos[0] || null, photos, notes: notes.join(' ') || undefined }
+  return { platform: 'styleseat', reviews: prof.ratings_count ? { source: 'StyleSeat', rating: +prof.rating_stars || null, count: +prof.ratings_count, items: [] } : null, name: prof.business_name || prof.name || null, phone: prof.public_phone_number || null, address, city: prof.city || null, about: prof.blurb || null, policies, hours, services, social, logo: prof.profile_photo || null, cover: photos[0] || null, photos, notes: notes.join(' ') || undefined }
 }
 
 // ── Vagaro: server-rendered /services page; model reads it (no durations/hours public)
@@ -374,6 +384,7 @@ function clean(data, baseUrl) {
   for (const k of ['logo', 'cover']) if (d[k]) { d[k] = abs(baseUrl, d[k]); if (!/^https?:/.test(d[k] || '')) delete d[k] }
   d.photos = (Array.isArray(d.photos) ? d.photos : []).map(u => abs(baseUrl, u)).filter(u => u && /^https?:/.test(u) && u !== d.logo).slice(0, 12)
   if (d.social && typeof d.social === 'object') { const soc = {}; for (const k of ['instagram', 'tiktok', 'facebook', 'yelp', 'google', 'website']) if (d.social[k]) soc[k] = String(d.social[k]).trim().replace(/^@/, '').slice(0, 200); d.social = soc } else d.social = {}
+  if (d.reviews && typeof d.reviews === 'object') { d.reviews = { source: String(d.reviews.source || '').slice(0, 40), rating: Number.isFinite(+d.reviews.rating) ? Math.round(+d.reviews.rating * 10) / 10 : null, count: Number.isFinite(+d.reviews.count) ? +d.reviews.count : 0, items: (d.reviews.items || []).slice(0, 30).map(x => ({ name: String(x.name || '').slice(0, 60), rating: x.rating, text: String(x.text || '').slice(0, 600), date: x.date || null })) } } else delete d.reviews
   for (const k of ['tagline', 'about', 'address', 'policies', 'name', 'city', 'phone', 'platform', 'notes', 'accent']) if (d[k] != null) d[k] = String(d[k]).trim().slice(0, k === 'about' || k === 'policies' ? 2000 : 300) || undefined
   return d
 }
@@ -464,6 +475,7 @@ async function applyImport(businessId, data, options = {}) {
     if (data.address && !biz.address) { upd.address = data.address; result.profile.push('address') }
     if (data.social && Object.keys(data.social).length) { upd.profile_social = { ...(biz.profile_social || {}), ...data.social }; result.profile.push('social') }
     if (data.business_type && (!biz.business_type || biz.business_type === 'other')) { upd.business_type = data.business_type; result.profile.push('type') }
+    if (data.reviews && (data.reviews.count || data.reviews.items?.length)) { upd.profile_reviews = data.reviews; result.profile.push(`reviews (${data.reviews.count})`) }
   }
   if (opt.photos) {
     if (data.logo && !biz.logo_url) { const u = await rehost(businessId, data.logo, 'logo'); if (u) { upd.logo_url = u; result.logo = true } }

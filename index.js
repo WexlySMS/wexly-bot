@@ -824,7 +824,7 @@ app.get('/admin/business/:id', async (req, res) => {
   try {
     const sb = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
     const baseCols = 'id, business_name, owner_name, owner_phone, email, plan, status, active, trial_ends_at, sms_number, business_type, timezone, created_at, onboarding, owner_phone_verified_at, interview_state, stripe_customer_id, stripe_subscription_id, stripe_account_id, stripe_account_connected, hours, bot_name, demo_mode, profile_slug, profile_enabled, profile_theme, profile_description, logo_url, address, profile_social, profile_photos'
-    let bq = await sb.from('businesses').select(baseCols + ', profile_about, profile_policies, profile_accent, profile_cover_url').eq('id', id).maybeSingle()
+    let bq = await sb.from('businesses').select(baseCols + ', profile_about, profile_policies, profile_accent, profile_cover_url, profile_reviews').eq('id', id).maybeSingle()
     if (bq.error && /column|42703/i.test(bq.error.message + bq.error.code)) bq = await sb.from('businesses').select(baseCols).eq('id', id).maybeSingle()   // v202 columns not migrated yet
     const { data: biz, error } = bq
     if (error) throw error
@@ -2529,7 +2529,7 @@ app.get('/public/profile-v2/:slug', async (req, res) => {
     // v202 columns (profile_cover_url, profile_about, profile_policies,
     // profile_accent) may not exist yet if the migration hasn't run; fall back.
     const base = 'id, business_name, business_type, business_type_custom, logo_url, sms_number, hours, timezone, address, profile_description, profile_photos, profile_social, profile_theme, profile_enabled, stripe_account_connected'
-    let q = await supabase.from('businesses').select(base + ', profile_cover_url, profile_about, profile_policies, profile_accent').eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
+    let q = await supabase.from('businesses').select(base + ', profile_cover_url, profile_about, profile_policies, profile_accent, profile_reviews').eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
     if (q.error && /column|42703/i.test(q.error.message + q.error.code)) q = await supabase.from('businesses').select(base).eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
     const biz = q.data
 
@@ -2577,6 +2577,7 @@ app.get('/public/profile-v2/:slug', async (req, res) => {
       address: biz.address || null,
       policies: biz.profile_policies || null,
       accent: biz.profile_accent || null,
+      reviews: biz.profile_reviews || null,
       depositsEnabled: biz.stripe_account_connected || false,
       services: (services.data || [])
         .filter(s => s.active !== false) // only filter if active column exists and is false
