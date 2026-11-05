@@ -70,6 +70,59 @@ function dissect(html, baseUrl) {
   return out
 }
 
+
+// ── Platform adapters ─────────────────────────────────────────────────────────
+// Deterministic parsers for platforms whose pages carry structured data. Each
+// returns a partial import object or null; the model fills whatever is missing.
+
+// GlossGenius: Next.js, everything lives in __NEXT_DATA__.props.serverContext
+// (publicUser.users[].services, locations[0].hours, cover_image_original,
+// organization_brand_logo, social urls) and a public portfolio API.
+async function parseGlossGenius(html, url) {
+  const m = html.match(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i)
+  if (!m) return null
+  let sc; try { sc = JSON.parse(m[1]).props?.serverContext } catch { return null }
+  const pu = sc?.publicUser; if (!pu || !Array.isArray(pu.users)) return null
+  const loc = (sc.locations || [])[0] || {}
+  const pad = n => String(n).padStart(2, '0')
+  const hhmm = t => t && Number.isFinite(+t.hours) ? `${pad(t.hours)}:${pad(t.minutes || 0)}` : null
+  const dayKeys = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+  const hours = loc.hours ? dayKeys.map((k, i) => { const r = (loc.hours[k] || [])[0]; const from = r && hhmm(r.startTime), to = r && hhmm(r.endTime); return from && to ? { day: dayNames[i], open: true, from, to } : { day: dayNames[i], open: false } }) : null
+  const services = []
+  for (const u of pu.users) for (const sv of u.services || []) {
+    if (!sv.name || sv.price_hidden) continue
+    const price = sv.price != null && sv.price !== '' ? String(parseFloat(sv.price)).replace(/\.0+$/, '') + (sv.price_varies ? '+' : '') : ''
+    services.push({ name: String(sv.name).trim(), price, duration_mins: +sv.total_duration || +sv.start_duration || null, description: sv.description ? String(sv.description).trim() : null, category: sv.category_name && sv.category_name !== 'None' ? sv.category_name : null, deposit: sv.deposit_amount ? String(sv.deposit_amount) : null, by_request: false, _order: sv.ordering ?? 999 })
+  }
+  services.sort((a, b) => a._order - b._order); services.forEach(x => delete x._order)
+  for (const pk of sc.packages || []) if (pk && pk.name) services.push({ name: String(pk.name).trim(), price: pk.price != null ? String(parseFloat(pk.price)).replace(/\.0+$/, '') : '', duration_mins: +pk.total_duration || null, description: pk.description || null, category: 'Packages', by_request: false })
+  const addr = loc.contactInfo?.address
+  const street = addr?.street_line_1 ? String(addr.street_line_1).replace(new RegExp('\\s*' + (addr.locality || '') + '.*$', 'i'), '').trim() : null
+  const address = addr ? [street, addr.street_line_2, [addr.locality, (addr.administrative_area || '').replace(/^us_/, '').toUpperCase(), addr.postal_code].filter(Boolean).join(' ')].filter(Boolean).join('\n') : (pu.business_address || null)
+  const handle = v => v ? String(v).replace(/^https?:\/\/(www\.)?(instagram|facebook|tiktok)\.com\//i, '').replace(/^@/, '').replace(/\/$/, '') : null
+  const social = {}
+  const ig = pu.instagram_url || pu.users[0]?.instagram_url; if (ig) social.instagram = handle(ig)
+  const fb = pu.facebook_url || pu.users[0]?.facebook_url; if (fb) social.facebook = fb
+  if (pu.website_url) social.website = pu.website_url
+  if (pu.yelp_url) social.yelp = pu.yelp_url
+  let photos = []
+  if (pu.slug) {
+    try { const r = await fetchText(`https://api.glossgenius.com/v3/web/portfolio_images?slug=${encodeURIComponent(pu.slug)}`, { accept: 'application/json', timeoutMs: 10000 }); const j = JSON.parse(r.body); photos = (j.data || []).map(x => x.image?.original || x.image?.medium).filter(Boolean) } catch { /* portfolio optional */ }
+  }
+  const cover = pu.cover_image_original || pu.cover_image_medium || null
+  const logo = pu.organization_brand_logo || (pu.users.length === 1 && !pu.users[0].default_avatar ? pu.users[0].avatar_medium : null) || null
+  const about = pu.about || pu.users[0]?.about || null
+  const notes = []
+  if (cover && /stockimage/.test(cover)) notes.push('Cover is a GlossGenius stock image; swap for a real photo if they have one.')
+  if (sc.reviewSummary?.reviewCount) notes.push(`${sc.reviewSummary.reviewCount} reviews on GlossGenius (${sc.reviewSummary.ratingValue} stars).`)
+  return { platform: 'glossgenius', name: pu.business_name || loc.name || null, phone: pu.business_phone || loc.contactInfo?.phone || pu.phone || null, address, city: addr?.locality || null, about, hours, services, social, cover, logo, photos, accent: pu.organization_accent_color || null, notes: notes.join(' ') || undefined }
+}
+
+const ADAPTERS = [
+  { test: (url, html) => /\.glossgenius\.com/i.test(url) || /"serverContext":\{"browser"/.test(html), run: parseGlossGenius },
+]
+
 // Extraction schema. Everything optional; the model must not invent.
 const TOOL = {
   name: 'save_import',
@@ -112,8 +165,8 @@ async function extract(url, parts) {
   const meta = Object.entries(parts.meta).filter(([k]) => /title|description|og:|twitter:|geo|place/i.test(k)).map(([k, v]) => `${k}: ${v}`).join('\n')
   const content = `Source URL: ${url}\n\nMETA TAGS:\n${meta || '(none)'}\n\nSTRUCTURED DATA (JSON-LD / framework state, may be truncated):\n${blobs || '(none)'}\n\nCANDIDATE IMAGES:\n${candidates || '(none)'}\n\nVISIBLE PAGE TEXT:\n${parts.text || '(empty)'}`
   const resp = await client.messages.create({
-    model: MODEL, max_tokens: 6000,
-    system: 'You extract business listing data from a salon, spa, barbershop or similar service business web page into the save_import tool. Be exhaustive on services. Be literal: copy names and prices as shown. Convert durations to minutes ("1 hr 30 min" = 90). Prices like "$150+" or "starting at $150" become "150+". If a value is not on the page, leave it out. Hours: map every day; closed days get open=false. If the page is a booking platform and the text is thin or empty, still return what you can and say so in notes.',
+    model: MODEL, max_tokens: 8000,
+    system: 'You extract business listing data from a salon, spa, barbershop or similar service business web page into the save_import tool. The STRUCTURED DATA block (JSON-LD and framework state) is part of the page and is usually the most complete source: services, prices, durations and hours found there must be extracted exactly as if they were visible text. Be exhaustive on services. Be literal: copy names and prices as shown. Convert durations to minutes ("1 hr 30 min" = 90). Prices like "$150+" or "starting at $150" become "150+". If a value is not on the page, leave it out. Hours: map every day; closed days get open=false. If the page is a booking platform and the text is thin or empty, still return what you can and say so in notes.',
     tools: [TOOL], tool_choice: { type: 'tool', name: 'save_import' },
     messages: [{ role: 'user', content }]
   })
@@ -144,7 +197,7 @@ function clean(data, baseUrl) {
   for (const k of ['logo', 'cover']) if (d[k]) { d[k] = abs(baseUrl, d[k]); if (!/^https?:/.test(d[k] || '')) delete d[k] }
   d.photos = (Array.isArray(d.photos) ? d.photos : []).map(u => abs(baseUrl, u)).filter(u => u && /^https?:/.test(u) && u !== d.logo).slice(0, 12)
   if (d.social && typeof d.social === 'object') { const soc = {}; for (const k of ['instagram', 'tiktok', 'facebook', 'yelp', 'google', 'website']) if (d.social[k]) soc[k] = String(d.social[k]).trim().replace(/^@/, '').slice(0, 200); d.social = soc } else d.social = {}
-  for (const k of ['tagline', 'about', 'address', 'policies', 'name', 'city', 'phone', 'platform', 'notes']) if (d[k] != null) d[k] = String(d[k]).trim().slice(0, k === 'about' || k === 'policies' ? 2000 : 300) || undefined
+  for (const k of ['tagline', 'about', 'address', 'policies', 'name', 'city', 'phone', 'platform', 'notes', 'accent']) if (d[k] != null) d[k] = String(d[k]).trim().slice(0, k === 'about' || k === 'policies' ? 2000 : 300) || undefined
   return d
 }
 
@@ -158,8 +211,19 @@ async function importFromUrl(rawUrl) {
   if (!/html/i.test(page.contentType)) return { error: `${url} is not a web page (${page.contentType.split(';')[0]}).` }
   const parts = dissect(page.body, page.finalUrl || url)
   if (parts.text.length < 200 && !parts.blobs.length && !parts.jsonld.length) warnings.push('The page has almost no readable content; it probably draws everything with JavaScript. Try the services or menu page of their site, or ask for a photo of the menu.')
+  // Platform adapter first (exact), then the model for anything it left blank.
+  let adapted = null
+  for (const a of ADAPTERS) { if (a.test(page.finalUrl || url, page.body)) { try { adapted = await a.run(page.body, page.finalUrl || url) } catch (err) { console.error('[Import] adapter failed:', err.message) } if (adapted) break } }
   let data
-  try { data = clean(await extract(page.finalUrl || url, parts), page.finalUrl || url) } catch (err) { return { error: `Could not read the page: ${err.message}` } }
+  try {
+    const modelOut = adapted && adapted.services.length && adapted.hours ? {} : await extract(page.finalUrl || url, parts)
+    const merged = { ...modelOut, ...(adapted || {}) }
+    for (const k of ['about', 'tagline', 'policies', 'business_type', 'address', 'city']) if (!merged[k] && modelOut[k]) merged[k] = modelOut[k]
+    if (adapted && !adapted.services.length && modelOut.services?.length) merged.services = modelOut.services
+    if (adapted && !adapted.hours && modelOut.hours) merged.hours = modelOut.hours
+    if (adapted && !adapted.photos?.length && modelOut.photos?.length) merged.photos = modelOut.photos
+    data = clean(merged, page.finalUrl || url)
+  } catch (err) { return { error: `Could not read the page: ${err.message}` } }
   if (!data.services.length) warnings.push('No services found on this page. If their menu is on another page, import that URL too.')
   if (!data.hours) warnings.push('No hours found on this page.')
   if (data.notes) warnings.push(data.notes)
