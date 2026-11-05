@@ -314,6 +314,9 @@ router.post('/webhook', async (req, res) => {
             notifyOwnerNewSignup(business).catch(err => console.error('[Notify] Owner notification failed:', err.message))
           }
 
+          // v202: live booking page from day one
+          require('../bot/trialOnboarding').ensureProfileSlug(business).catch(err => console.error('[Profile] slug failed:', err.message))
+
           // Auto-assign Twilio number in background
           if (!business.sms_number) {
             const areaCode = extractAreaCode(business.address)

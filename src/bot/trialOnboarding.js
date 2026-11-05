@@ -196,9 +196,26 @@ function trialEndLabel(biz, tz) {
 // Buys the number (local to the owner's cell when possible) and sends the
 // welcome from it. Never throws: signup must succeed even if Twilio hiccups;
 // the drip sweep retries number assignment for trial accounts with no number.
+// v202: every business gets a live page at getwexly.com/book/<slug> the moment it
+// exists. Slug from the name, de-duplicated with a numeric suffix. Idempotent.
+async function ensureProfileSlug(biz) {
+  if (!biz || biz.profile_slug) return biz?.profile_slug || null
+  const base = String(biz.business_name || 'book').toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'book'
+  for (let i = 0; i < 20; i++) {
+    const slug = i === 0 ? base : `${base}-${i + 1}`
+    const { data: taken } = await supabase.from('businesses').select('id').eq('profile_slug', slug).neq('id', biz.id).maybeSingle()
+    if (taken) continue
+    const { error } = await supabase.from('businesses').update({ profile_slug: slug, profile_enabled: true }).eq('id', biz.id)
+    if (!error) { console.log(`[Profile] ${biz.business_name} → getwexly.com/book/${slug}`); return slug }
+  }
+  return null
+}
+function profileUrl(biz) { return biz?.profile_slug ? `${SITE_URL}/book/${biz.profile_slug}` : null }
+
 async function activateInstantTrial(businessId) {
   const { data: biz } = await supabase.from('businesses').select('*').eq('id', businessId).maybeSingle()
   if (!biz) return null
+  ensureProfileSlug(biz).catch(e => console.error('[Profile] slug failed:', e.message))
 
   let number = biz.sms_number
   if (!number) {
@@ -348,6 +365,7 @@ async function runTrialOnboardingDrip() {
   for (const biz of trials || []) {
     try {
       const ob = biz.onboarding || {}
+      if (!biz.profile_slug) await ensureProfileSlug(biz).catch(() => {})   // v202 backfill
       if (!ob.welcome_sent_at) {
         // Welcome never landed (carrier hiccup at signup). Try again; the rest
         // of the drip waits until it has.
@@ -450,6 +468,6 @@ async function runTrialOnboardingDrip() {
 module.exports = {
   normalizeUSPhone, formatPhone,
   sendVerificationCode, verifyCode, isRecentlyVerified, phoneAlreadyUsedTrial,
-  lineTypeCheck, activateInstantTrial, sendTrialWelcome, setupOfferReply, recordSetupRequest, recordSetupSource, setupSourceAck, expiredOwnerReply,
+  lineTypeCheck, activateInstantTrial, sendTrialWelcome, ensureProfileSlug, profileUrl, setupOfferReply, recordSetupRequest, recordSetupSource, setupSourceAck, expiredOwnerReply,
   runTrialOnboardingDrip, addCardLink, TRIAL_DAYS
 }

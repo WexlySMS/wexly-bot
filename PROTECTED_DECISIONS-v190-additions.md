@@ -221,3 +221,21 @@ Operator fix for a number already in this state: Twilio → Messaging → Servic
 - POST /admin/business/:id/renumber { areaCode } (x-admin-secret): release current number → assignNumberToBusiness(areaCode or any) → clears onboarding.welcome_sent_at (read-merge) → sendTrialWelcome after the 3-min hold. Drawer: Setup tools → "Wexly number" card → Swap number (confirm dialog; customers lose the old number).
 - Welcome trimmed to ~154 chars for typical names: one GSM segment, as the v199 comment already claimed.
 - Supabase: Nano compute exhausted its disk-IO burst budget on Nov 4 ~6:50 PM PT → 522 on every API call for ~25 min. Fixed by resizing to Micro (Pro credit). Not a code issue. email_events still needs `alter table public.email_events enable row level security;` (Brandon to run; bot uses service key, unaffected).
+
+## Entry 70 (v201): warm number pool
+- Finding (Nov 4-5): fresh Twilio numbers bounce 30003 on some carriers for hours after being added to the 10DLC campaign; the same numbers delivered the next morning; August-era numbers delivered instantly to the same handsets. Salon J's carrier took ~14 min. Not code, not content (plain "test" bounced), not the messaging service (620 via the same service delivered).
+- Rule: a trial never gets a fresh number. `number_pool` table; bot keeps NUMBER_POOL_MIN (5) idle registered numbers, tops up hourly, hands out the oldest (same area code preferred when it is at least NUMBER_POOL_MIN_AGE_HOURS=12 old), trims above NUMBER_POOL_MAX (12). Fresh purchase only when the pool is empty, with the 3-min hold.
+- Release returns a number to the pool with NUMBER_POOL_QUARANTINE_DAYS (30) before reuse, instead of deleting it. Ageing is the scarce asset.
+- Boot: importOrphanedNumbers() sweeps every Wexly-owned SMS number not used by a live business (cancelled, pending_checkout, trial_expired, old tests) into the pool; excludes TWILIO_PHONE_NUMBER.
+- Admin: GET /admin/pool, POST /admin/pool/buy {count, areaCode}, POST /admin/pool/import. Tools tab → Number pool card (site v202).
+- Table (run once in SQL Editor):
+  create table if not exists public.number_pool (phone_number text primary key, twilio_sid text not null, area_code text, purchased_at timestamptz not null default now(), in_service boolean not null default true, assigned_business_id uuid references public.businesses(id) on delete set null, assigned_at timestamptz, released_at timestamptz, note text);
+  alter table public.number_pool enable row level security;
+
+## Entry 71 (bot v202 / site v203): booking page, rebuilt
+- Every business gets a live page at getwexly.com/book/<slug> automatically: ensureProfileSlug() runs at instant-trial activation, at Stripe checkout completion, and as a backfill in the drip sweep. Slug = name, lowercased, suffixed on collision.
+- book.html rebuilt: one column, cover photo hero with the name in Instrument Serif, menu-card services (name, dotted leader, price; categories as italic headings), Work grid with lightbox, About, Hours with "Open now, closes 7pm", Find us (address + Maps link), Policies, Connect, sticky "Text (number) to book" bar. No scroll animations. Theme keys unchanged (clean/midnight/warm/luxe/bold) with new palettes; optional profile_accent overrides button color.
+- /public/profile-v2 now returns coverPhoto, about, address, policies, accent; 60s cache header.
+- New columns (run once): alter table public.businesses add column if not exists profile_cover_url text, add column if not exists profile_about text, add column if not exists profile_policies text, add column if not exists profile_accent text;
+- Admin: PUT /admin/business/:id/profile; drawer "Booking page" card with every field; setup-done text template includes the page URL. Dashboard editor: cover upload (storage bucket profile-photos), about, address, policies, button color.
+- Not yet: server-rendered link previews (OG tags) for shares; needs a Netlify proxy of /book/* to the bot. Next step.

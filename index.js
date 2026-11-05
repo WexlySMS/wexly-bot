@@ -823,9 +823,10 @@ app.get('/admin/business/:id', async (req, res) => {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Bad id' })
   try {
     const sb = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
-    const { data: biz, error } = await sb.from('businesses')
-      .select('id, business_name, owner_name, owner_phone, email, plan, status, active, trial_ends_at, sms_number, business_type, timezone, created_at, onboarding, owner_phone_verified_at, interview_state, stripe_customer_id, stripe_subscription_id, stripe_account_id, stripe_account_connected, hours, bot_name, demo_mode')
-      .eq('id', id).maybeSingle()
+    const baseCols = 'id, business_name, owner_name, owner_phone, email, plan, status, active, trial_ends_at, sms_number, business_type, timezone, created_at, onboarding, owner_phone_verified_at, interview_state, stripe_customer_id, stripe_subscription_id, stripe_account_id, stripe_account_connected, hours, bot_name, demo_mode, profile_slug, profile_enabled, profile_theme, profile_description, logo_url, address, profile_social, profile_photos'
+    let bq = await sb.from('businesses').select(baseCols + ', profile_about, profile_policies, profile_accent, profile_cover_url').eq('id', id).maybeSingle()
+    if (bq.error && /column|42703/i.test(bq.error.message + bq.error.code)) bq = await sb.from('businesses').select(baseCols).eq('id', id).maybeSingle()   // v202 columns not migrated yet
+    const { data: biz, error } = bq
     if (error) throw error
     if (!biz) return res.status(404).json({ error: 'Not found' })
 
@@ -991,6 +992,64 @@ app.put('/admin/business/:id/owner-phone', async (req, res) => {
     if (error) throw error
     console.log(`[Admin] owner_phone for ${id} → ${phone} (${lt.type || 'unknown'})`)
     res.json({ success: true, phone, line_type: lt.type || 'unknown' })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+// ── Admin: warm number pool (v201, Entry 70) ───────────────────────────────────
+app.get('/admin/pool', async (req, res) => {
+  if (!isValidAdminSecret(req.headers['x-admin-secret'])) return res.status(403).json({ error: 'Forbidden' })
+  try { res.json(await require('./src/utils/twilioManager').poolStatus()) }
+  catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+// Buy N numbers straight into the pool (optionally in one area code).
+app.post('/admin/pool/buy', async (req, res) => {
+  if (!isValidAdminSecret(req.headers['x-admin-secret'])) return res.status(403).json({ error: 'Forbidden' })
+  const count = Math.min(Math.max(parseInt(req.body.count) || 1, 1), 10)
+  const areaCode = String(req.body.areaCode || '').replace(/\D/g, '').slice(0, 3) || null
+  try {
+    const tm = require('./src/utils/twilioManager')
+    const sb = adminSb(); const bought = []
+    for (let i = 0; i < count; i++) {
+      const b = await tm.buyNumber(areaCode, 'Wexly — pool')
+      await sb.from('number_pool').upsert({ phone_number: b.number, twilio_sid: b.sid, area_code: b.number.slice(2, 5), purchased_at: new Date().toISOString(), in_service: b.attached }, { onConflict: 'phone_number' })
+      bought.push(b.number)
+    }
+    console.log(`[Admin] pool buy: ${bought.join(', ')}`)
+    res.json({ success: true, bought })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+// Sweep orphaned Wexly numbers (cancelled accounts, old tests) into the pool.
+app.post('/admin/pool/import', async (req, res) => {
+  if (!isValidAdminSecret(req.headers['x-admin-secret'])) return res.status(403).json({ error: 'Forbidden' })
+  try {
+    const tm = require('./src/utils/twilioManager')
+    const result = await tm.importOrphanedNumbers()
+    tm.maintainNumberPool().catch(() => {})
+    res.json(result)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+// Public page editor (v202). Same fields the dashboard editor writes, so you
+// can set a customer's page up for them from the drawer. Slug must be unique.
+app.put('/admin/business/:id/profile', async (req, res) => {
+  const id = adminBiz(req, res); if (!id) return
+  const b = req.body || {}
+  const upd = {}
+  if (b.slug !== undefined) { const slug = String(b.slug).toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 40); if (slug.length < 2) return res.status(400).json({ error: 'Slug needs at least 2 characters' }); upd.profile_slug = slug }
+  if (b.enabled !== undefined) upd.profile_enabled = !!b.enabled
+  if (b.theme !== undefined) upd.profile_theme = ['clean', 'midnight', 'warm', 'luxe', 'bold', 'default'].includes(b.theme) ? b.theme : 'default'
+  if (b.accent !== undefined) upd.profile_accent = /^#[0-9a-f]{6}$/i.test(String(b.accent || '')) ? b.accent : null
+  for (const [k, col, max] of [['description', 'profile_description', 200], ['about', 'profile_about', 2000], ['policies', 'profile_policies', 2000], ['address', 'address', 300], ['cover', 'profile_cover_url', 500], ['logo', 'logo_url', 500]]) {
+    if (b[k] !== undefined) upd[col] = String(b[k] || '').trim().slice(0, max) || null
+  }
+  if (b.social !== undefined && typeof b.social === 'object') { const soc = {}; for (const k of ['instagram', 'facebook', 'tiktok', 'website', 'yelp', 'google']) if (b.social[k]) soc[k] = String(b.social[k]).trim().slice(0, 200); upd.profile_social = soc }
+  if (!Object.keys(upd).length) return res.status(400).json({ error: 'Nothing to update' })
+  try {
+    const { error } = await adminSb().from('businesses').update(upd).eq('id', id)
+    if (error) throw /unique|duplicate/i.test(error.message) ? new Error('That URL is taken, pick another slug') : error
+    res.json({ success: true, updated: Object.keys(upd) })
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
@@ -2400,14 +2459,15 @@ app.get('/public/profile/:slug', async (req, res) => {
 app.get('/public/profile-v2/:slug', async (req, res) => {
   try {
     const { slug } = req.params
-    const { data: biz } = await supabase
-      .from('businesses')
-      .select('id, business_name, business_type, business_type_custom, logo_url, sms_number, hours, timezone, profile_description, profile_photos, profile_social, profile_theme, profile_enabled, stripe_account_connected')
-      .eq('profile_slug', slug.toLowerCase())
-      .eq('profile_enabled', true)
-      .maybeSingle()
+    // v202 columns (profile_cover_url, profile_about, profile_policies,
+    // profile_accent) may not exist yet if the migration hasn't run; fall back.
+    const base = 'id, business_name, business_type, business_type_custom, logo_url, sms_number, hours, timezone, address, profile_description, profile_photos, profile_social, profile_theme, profile_enabled, stripe_account_connected'
+    let q = await supabase.from('businesses').select(base + ', profile_cover_url, profile_about, profile_policies, profile_accent').eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
+    if (q.error && /column|42703/i.test(q.error.message + q.error.code)) q = await supabase.from('businesses').select(base).eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
+    const biz = q.data
 
     if (!biz) return res.status(404).json({ error: 'Business not found' })
+    res.set('Cache-Control', 'public, max-age=60')
 
     const [services, bundles] = await Promise.all([
       supabase.from('services').select('*')
@@ -2444,6 +2504,12 @@ app.get('/public/profile-v2/:slug', async (req, res) => {
       photos: biz.profile_photos || [],
       social: biz.profile_social || {},
       theme: biz.profile_theme || 'default',
+      // v202 page fields
+      coverPhoto: biz.profile_cover_url || null,
+      about: biz.profile_about || null,
+      address: biz.address || null,
+      policies: biz.profile_policies || null,
+      accent: biz.profile_accent || null,
       depositsEnabled: biz.stripe_account_connected || false,
       services: (services.data || [])
         .filter(s => s.active !== false) // only filter if active column exists and is false
@@ -3499,7 +3565,7 @@ app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════╗
   ║   Wexly SMS Bot v2.0                 ║
-  ║   BUILD: v200 (renumber, 154ch hi)   ║
+  ║   BUILD: v202 (pool, booking page)   ║
   ║   Running on port ${PORT}               ║
   ║                                      ║
   ║   SMS:    POST /webhook/sms          ║

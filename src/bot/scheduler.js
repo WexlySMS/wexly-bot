@@ -197,6 +197,14 @@ function startScheduler() {
   // 🔒 v191 Owner reminders ("remind me tomorrow at 9...") — every 2 min
   setInterval(() => sendOwnerReminders().catch(console.error), 60 * 1000)
 
+  // 🔒 v201 Warm number pool (Entry 70). On boot: sweep orphaned Wexly numbers
+  // into the pool, then top it up. Hourly after that.
+  {
+    const { importOrphanedNumbers, maintainNumberPool } = require('../utils/twilioManager')
+    setTimeout(() => importOrphanedNumbers().then(() => maintainNumberPool()).catch(console.error), 20 * 1000)
+    setInterval(() => maintainNumberPool().catch(console.error), 60 * 60 * 1000)
+  }
+
   // Daily automations — check every hour at 8am PT
   setInterval(() => {
     const ptHour = parseInt(new Intl.DateTimeFormat('en-US', {
