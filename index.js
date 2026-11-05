@@ -2745,7 +2745,6 @@ app.post('/public/book/:slug', async (req, res) => {
       business_id: biz.id,
       customer_name,
       customer_phone: normalizedPhone,
-      customer_email: email || null,
       service_name: service.name,
       service_id: service.id,
       appointment_date: date,
@@ -2753,8 +2752,10 @@ app.post('/public/book/:slug', async (req, res) => {
       duration_mins: service.duration_mins || 60,
       status: service.booking_mode === 'request' ? 'pending_approval' : 'confirmed',
       staff_name: staffName || null,
-      source: 'website',
-      notes: 'Booked online via public profile'
+      // v203: appointments has no customer_email/source columns (the insert
+      // failed with "column does not exist" and every online booking showed
+      // "Booking failed"). Email lives on the customer row; source goes in notes.
+      notes: 'Booked online via public profile' + (email ? ` (${email})` : '')
     })
 
     // Native app push (additive; no-op when no device is registered)
@@ -2851,8 +2852,8 @@ app.post('/public/book/:slug', async (req, res) => {
       }
     })
   } catch (err) {
-    console.error('[Online Booking] Error:', err.message)
-    res.status(500).json({ error: 'Booking failed — please try again or text us directly' })
+    console.error('[Online Booking] Error:', err.message, err.details || '', err.hint || '')
+    res.status(500).json({ error: 'Could not save the booking. Text us and we will get you in.' })
   }
 })
 

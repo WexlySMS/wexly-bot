@@ -119,9 +119,186 @@ async function parseGlossGenius(html, url) {
   return { platform: 'glossgenius', name: pu.business_name || loc.name || null, phone: pu.business_phone || loc.contactInfo?.phone || pu.phone || null, address, city: addr?.locality || null, about, hours, services, social, cover, logo, photos, accent: pu.organization_accent_color || null, notes: notes.join(' ') || undefined }
 }
 
+// ── Shared helpers for adapters ───────────────────────────────────────────────
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const DAY_FULL = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 }
+const emptyWeek = () => DAYS.map(day => ({ day, open: false }))
+// "11:00 AM" / "9:30pm" / "17:00" / "09:00:00" → "HH:MM"
+function to24(t) {
+  if (!t) return null
+  const m = String(t).trim().match(/^(\d{1,2})(?::(\d{2}))?(?::\d{2})?\s*(am|pm|a\.m\.|p\.m\.)?$/i)
+  if (!m) return null
+  let h = +m[1]; const mi = m[2] || '00'; const ap = (m[3] || '').toLowerCase().replace(/\./g, '')
+  if (ap === 'pm' && h < 12) h += 12; if (ap === 'am' && h === 12) h = 0
+  if (h > 23) return null
+  return `${String(h).padStart(2, '0')}:${mi}`
+}
+// "1 hr 30 min", "40 min", "2 hr", "90" → minutes
+function toMinutes(c) {
+  if (c == null) return null
+  if (typeof c === 'number') return c > 0 ? Math.round(c) : null
+  const str = String(c).toLowerCase(); let m = 0
+  const h = str.match(/(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours)\b/); if (h) m += Math.round(parseFloat(h[1]) * 60)
+  const mi = str.match(/(\d+)\s*(?:m|min|mins|minute|minutes)\b/); if (mi) m += +mi[1]
+  if (!h && !mi && /^\d+$/.test(str.trim())) m = +str.trim()
+  return m > 0 ? m : null
+}
+// "from $40", "$65.00", "US$15", "$150+" → "40", "65", "150+"
+function toPrice(p) {
+  if (p == null || p === '') return ''
+  if (typeof p === 'number') return String(p).replace(/\.0+$/, '')
+  const str = String(p); const from = /\bfrom\b|\+|and up|starting/i.test(str)
+  const n = str.replace(/,/g, '').match(/(\d+(?:\.\d+)?)/); if (!n) return ''
+  return String(parseFloat(n[1])).replace(/\.0+$/, '') + (from ? '+' : '')
+}
+function jsonLdAll(html) {
+  const out = []
+  for (const m of html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) { try { const j = JSON.parse(m[1].trim()); (Array.isArray(j) ? j : j['@graph'] ? j['@graph'] : [j]).forEach(x => out.push(x)) } catch { /* ignore */ } }
+  return out
+}
+function ldBusiness(html) {
+  return jsonLdAll(html).find(x => { const t = [].concat(x['@type'] || []).join(' '); return /Salon|Barber|Spa|Beauty|LocalBusiness|HealthAndBeauty|Store|NailSalon|DaySpa|TattooParlor|Dentist|MedicalBusiness/i.test(t) && x.name && x.name !== 'Booksy' })
+}
+function hoursFromLd(biz) {
+  const spec = biz?.openingHoursSpecification; if (!Array.isArray(spec) || !spec.length) return null
+  const week = emptyWeek()
+  for (const sp of spec) { const from = to24(sp.opens), to = to24(sp.closes); if (!from || !to) continue; for (const d of [].concat(sp.dayOfWeek || [])) { const i = DAY_FULL[String(d).replace(/.*\//, '').toLowerCase()]; if (i != null) week[i] = { day: DAYS[i], open: true, from, to } } }
+  return week.some(w => w.open) ? week : null
+}
+function addressFromLd(biz) {
+  const a = biz?.address; if (!a) return null
+  if (typeof a === 'string') return a
+  const line2 = [a.addressLocality, (a.addressRegion || '').replace(/^California$/i, 'CA'), a.postalCode].filter(Boolean).join(' ')
+  const street = (a.streetAddress || '').replace(new RegExp(',?\\s*' + (a.addressLocality || '§') + '.*$', 'i'), '').trim()
+  return [street, line2].filter(Boolean).join('\n') || null
+}
+function handleOf(url) { return url ? String(url).replace(/^https?:\/\/(www\.)?(instagram|tiktok)\.com\//i, '').replace(/^@/, '').replace(/[/?].*$/, '') : null }
+function socialFromLd(biz) {
+  const soc = {}
+  for (const u of [].concat(biz?.sameAs || [])) { if (/instagram\.com/i.test(u)) soc.instagram = handleOf(u); else if (/facebook\.com/i.test(u)) soc.facebook = u; else if (/tiktok\.com/i.test(u)) soc.tiktok = handleOf(u); else if (/yelp\.com/i.test(u)) soc.yelp = u }
+  return soc
+}
+
+// Nuxt "devalue" payload (__NUXT_DATA__): a flat array where numbers are
+// references to other slots. Resolve lazily with a cycle guard.
+function devalueResolver(arr) {
+  const cache = new Map()
+  const res = (i, depth = 0) => {
+    if (typeof i !== 'number' || depth > 12) return i
+    if (cache.has(i)) return cache.get(i)
+    const v = arr[i]
+    if (Array.isArray(v)) { if (typeof v[0] === 'string' && /^(ShallowReactive|Reactive|Ref|ShallowRef|Set|Map|NaN|Date)$/.test(v[0])) return res(v[1], depth + 1); const out = []; cache.set(i, out); v.forEach(x => out.push(res(x, depth + 1))); return out }
+    if (v && typeof v === 'object') { const out = {}; cache.set(i, out); for (const [k, x] of Object.entries(v)) out[k] = res(x, depth + 1); return out }
+    return v
+  }
+  return res
+}
+
+// ── Booksy: __NUXT_DATA__ business object + JSON-LD ───────────────────────────
+async function parseBooksy(html, url) {
+  const m = html.match(/<script[^>]*id=["']__NUXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i); if (!m) return null
+  let arr; try { arr = JSON.parse(m[1]) } catch { return null }
+  const idx = arr.findIndex(v => v && typeof v === 'object' && !Array.isArray(v) && 'serviceCategories' in v && 'openHours' in v)
+  if (idx < 0) return null
+  const b = devalueResolver(arr)(idx)
+  const ld = ldBusiness(html)
+  const services = []
+  for (const cat of b.serviceCategories || []) for (const sv of cat.services || []) {
+    if (!sv?.name) continue
+    const v = (sv.variants || [])[0] || {}
+    services.push({ name: sv.name, price: toPrice(v.price ?? sv.servicePrice), duration_mins: toMinutes(v.duration), description: sv.description || null, category: cat.name || null, deposit: v.deposit ? toPrice(v.deposit) : null, by_request: false })
+    for (const extra of (sv.variants || []).slice(1)) if (extra.label) services.push({ name: `${sv.name} (${extra.label})`, price: toPrice(extra.price), duration_mins: toMinutes(extra.duration), description: null, category: cat.name || null, deposit: extra.deposit ? toPrice(extra.deposit) : null, by_request: false })
+  }
+  let hours = hoursFromLd(ld)
+  if (!hours && Array.isArray(b.openHours) && b.openHours.length) { hours = emptyWeek(); for (const h of b.openHours) { const i = (h.dayOfWeek + 1) % 7; const from = to24(h.openFrom), to = to24(h.openTill); if (from && to) hours[i] = { day: DAYS[i], open: true, from, to } } }
+  const img = b.images || {}
+  const first = k => (img[k] || [])[0]?.image || null
+  const photos = [...(img.bizPhoto || []), ...(img.inspiration || [])].map(x => x.image).filter(Boolean)
+  const social = { ...socialFromLd(ld) }; if (b.instagramLink) social.instagram = handleOf(b.instagramLink); if (b.facebookLink) social.facebook = b.facebookLink; if (b.website) social.website = b.website
+  const notes = []; if (ld?.aggregateRating?.reviewCount) notes.push(`${ld.aggregateRating.reviewCount} reviews on Booksy (${ld.aggregateRating.ratingValue} stars).`)
+  return { platform: 'booksy', name: b.name || ld?.name || null, phone: ld?.telephone || null, address: addressFromLd(ld) || b.location?.address || null, city: b.location?.city || null, about: b.description || null, policies: b.depositPolicy || null, hours, services, social, cover: first('cover') || ld?.image || null, logo: first('logo') || ld?.logo || null, photos, notes: notes.join(' ') || undefined }
+}
+
+// ── Fresha: __NEXT_DATA__.props.pageProps.data.location + JSON-LD ─────────────
+async function parseFresha(html, url) {
+  const m = html.match(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i); if (!m) return null
+  let loc; try { loc = JSON.parse(m[1]).props?.pageProps?.data?.location } catch { return null }
+  if (!loc) return null
+  const ld = ldBusiness(html)
+  const services = []
+  const cats = [...(loc.services || [])].sort((a, b) => (/^featured$/i.test(a.name) ? 1 : 0) - (/^featured$/i.test(b.name) ? 1 : 0))
+  for (const cat of cats) for (const it of cat.items || []) {
+    if (!it?.name) continue
+    const v = (it.variants || [])[0] || {}
+    services.push({ name: it.name.trim(), price: toPrice(it.formattedRetailPrice || it.retailPrice?.value), duration_mins: toMinutes(it.caption || v.caption), description: it.description || null, category: /^featured$/i.test(cat.name) ? null : cat.name, by_request: false })
+  }
+  let hours = hoursFromLd(ld)
+  if (!hours && loc.workingTime?.days) { hours = emptyWeek(); for (const d of loc.workingTime.days) { const i = DAY_FULL[String(d.dayName).toLowerCase()]; const span = (d.values || [])[0]?.value; if (i == null || d.isClosed || !span) continue; const [a, bb] = span.split(/\s*[-–]\s*/); const from = to24(a), to = to24(bb); if (from && to) hours[i] = { day: DAYS[i], open: true, from, to } } if (!hours.some(h => h.open)) hours = null }
+  const photos = [...((loc.portfolioGallery?.edges || []).map(e => e.node?.image?.url)), ...((loc.galleryMobileImages || []).map(x => x.url)), ...((loc.venueSnippetImages || []).map(x => x.url))].filter(Boolean)
+  const notes = []; if (ld?.aggregateRating?.reviewCount) notes.push(`${ld.aggregateRating.reviewCount} reviews on Fresha (${ld.aggregateRating.ratingValue} stars).`)
+  return { platform: 'fresha', name: loc.name || ld?.name || null, phone: loc.contactNumber || ld?.telephone || null, address: addressFromLd(ld), about: loc.description || null, hours, services, social: socialFromLd(ld), cover: loc.coverImage?.url || null, logo: loc.venueLogo?.url || null, photos, notes: notes.join(' ') || undefined }
+}
+
+// ── StyleSeat: public JSON APIs keyed by the vanity slug ──────────────────────
+async function parseStyleSeat(html, url) {
+  const slug = (url.match(/styleseat\.com\/(?:m\/)?v\/([a-z0-9_-]+)/i) || [])[1]; if (!slug) return null
+  const get = async u => { const r = await fetchText(u, { accept: 'application/json', timeoutMs: 12000 }); if (!r.ok) throw new Error(`${u} → ${r.status}`); return JSON.parse(r.body) }
+  const prof = await get(`https://www.styleseat.com/api/v1/consumer/${encodeURIComponent(slug)}/providerprofileclientview`)
+  if (!prof?.id) return null
+  const [groups, gallery] = await Promise.all([
+    get(`https://www.styleseat.com/api/v2/providers/${prof.id}/servicegroups`).catch(() => ({ results: [] })),
+    get(`https://www.styleseat.com/api/v3/providers/${prof.id}/gallery_media/`).catch(() => ({ results: [] }))
+  ])
+  const services = []
+  for (const g of groups.results || []) for (const sv of g.services || []) {
+    if (!sv?.name || sv.is_private) continue
+    services.push({ name: sv.name.trim(), price: toPrice(sv.cost) + (sv.cost_and_up && sv.cost ? '+' : ''), duration_mins: toMinutes(sv.duration_minutes), description: sv.blurb || null, category: g.name || null, deposit: sv.require_deposit && sv.deposit_amount ? toPrice(sv.deposit_amount) : null, by_request: !sv.is_online_bookable })
+  }
+  let hours = null
+  if (Array.isArray(prof.business_hours) && prof.business_hours.length) { hours = emptyWeek(); for (const h of prof.business_hours) { const i = DAY_FULL[String(h.day).toLowerCase()]; const from = to24(h.start_time), to = to24(h.end_time); if (i != null && !h.closed && from && to) hours[i] = { day: DAYS[i], open: true, from, to } } if (!hours.some(h => h.open)) hours = null }
+  const address = [prof.address1, prof.address2, [prof.city, prof.state, prof.zipcode].filter(Boolean).join(' ')].filter(Boolean).join('\n') || null
+  const photos = (gallery.results || []).filter(x => x.media_type === 'image' && x.url).map(x => x.url)
+  const social = {}; if (prof.instagram) social.instagram = handleOf(prof.instagram)
+  const policies = [prof.cancellation_policy_text, prof.deposit_policy_text].filter(Boolean).join('\n') || null
+  const notes = []; if (prof.ratings_count) notes.push(`${prof.ratings_count} reviews on StyleSeat (${prof.rating_stars} stars).`)
+  return { platform: 'styleseat', name: prof.business_name || prof.name || null, phone: prof.public_phone_number || null, address, city: prof.city || null, about: prof.blurb || null, policies, hours, services, social, logo: prof.profile_photo || null, cover: photos[0] || null, photos, notes: notes.join(' ') || undefined }
+}
+
+// ── Vagaro: server-rendered /services page; model reads it (no durations/hours public)
+async function parseVagaro(html, url) {
+  const base = (url.match(/^https?:\/\/(?:www\.)?vagaro\.com\/[a-z0-9_-]+/i) || [])[0]; if (!base) return null
+  const extra = []
+  for (const path of ['/services', '/about']) { try { const r = await fetchText(base + path); if (r.ok && /html/i.test(r.contentType)) extra.push(r.body) } catch { /* optional */ } }
+  return { platform: 'vagaro', _extraHtml: extra, notes: 'Vagaro does not publish durations or hours; check those with the owner.' }
+}
+
+// ── Square: booking widget is a JavaScript app with no readable content ───────
+async function parseSquare(html, url) {
+  return { platform: 'square', services: [], notes: 'Square booking pages only load inside the browser, so there is nothing to read here. If they have a Square Online site (name.square.site) import that, or ask for a photo of their menu.' }
+}
+
 const ADAPTERS = [
   { test: (url, html) => /\.glossgenius\.com/i.test(url) || /"serverContext":\{"browser"/.test(html), run: parseGlossGenius },
+  { test: (url) => /booksy\.com\//i.test(url), run: parseBooksy },
+  { test: (url) => /fresha\.com\/a\//i.test(url), run: parseFresha },
+  { test: (url) => /styleseat\.com\/(m\/)?v\//i.test(url), run: parseStyleSeat },
+  { test: (url) => /vagaro\.com\//i.test(url), run: parseVagaro },
+  { test: (url) => /(book\.)?squareup\.com\/appointments|square\.site\/book/i.test(url), run: parseSquare },
 ]
+
+// Own websites: if the landing page has few services, look at the usual
+// subpages before giving up.
+async function discoverSubpages(html, base) {
+  const found = new Set()
+  for (const m of html.matchAll(/<a[^>]+href=["']([^"'#?]+)["'][^>]*>([\s\S]{0,80}?)<\/a>/gi)) {
+    const href = m[1], label = decode(m[2].replace(/<[^>]+>/g, ' '))
+    if (/services?|menu|pricing|prices?|price-list|treatments?|book/i.test(href + ' ' + label)) { const u = abs(base, href); if (u && new URL(u).origin === new URL(base).origin && u.replace(/\/$/, '') !== base.replace(/\/$/, '')) found.add(u) }
+    if (found.size >= 3) break
+  }
+  const pages = []
+  for (const u of found) { try { const r = await fetchText(u); if (r.ok && /html/i.test(r.contentType)) pages.push(r.body) } catch { /* skip */ } }
+  return pages
+}
 
 // Extraction schema. Everything optional; the model must not invent.
 const TOOL = {
@@ -163,7 +340,7 @@ async function extract(url, parts) {
   const candidates = parts.images.slice(0, 60).map((i, n) => `${n + 1}. ${i.url}${i.hint ? `  (${i.hint})` : ''}`).join('\n')
   const blobs = [...parts.jsonld.map(j => JSON.stringify(j)), ...parts.blobs].join('\n\n').slice(0, MAX_BLOBS)
   const meta = Object.entries(parts.meta).filter(([k]) => /title|description|og:|twitter:|geo|place/i.test(k)).map(([k, v]) => `${k}: ${v}`).join('\n')
-  const content = `Source URL: ${url}\n\nMETA TAGS:\n${meta || '(none)'}\n\nSTRUCTURED DATA (JSON-LD / framework state, may be truncated):\n${blobs || '(none)'}\n\nCANDIDATE IMAGES:\n${candidates || '(none)'}\n\nVISIBLE PAGE TEXT:\n${parts.text || '(empty)'}`
+  const content = `Source URL: ${url}\n\nMETA TAGS:\n${meta || '(none)'}\n\nSTRUCTURED DATA (JSON-LD / framework state, may be truncated):\n${blobs || '(none)'}\n\nCANDIDATE IMAGES:\n${candidates || '(none)'}\n\nVISIBLE PAGE TEXT:\n${(parts.text || '(empty)').slice(0, MAX_TEXT * 2)}`
   const resp = await client.messages.create({
     model: MODEL, max_tokens: 8000,
     system: 'You extract business listing data from a salon, spa, barbershop or similar service business web page into the save_import tool. The STRUCTURED DATA block (JSON-LD and framework state) is part of the page and is usually the most complete source: services, prices, durations and hours found there must be extracted exactly as if they were visible text. Be exhaustive on services. Be literal: copy names and prices as shown. Convert durations to minutes ("1 hr 30 min" = 90). Prices like "$150+" or "starting at $150" become "150+". If a value is not on the page, leave it out. Hours: map every day; closed days get open=false. If the page is a booking platform and the text is thin or empty, still return what you can and say so in notes.',
@@ -216,10 +393,16 @@ async function importFromUrl(rawUrl) {
   for (const a of ADAPTERS) { if (a.test(page.finalUrl || url, page.body)) { try { adapted = await a.run(page.body, page.finalUrl || url) } catch (err) { console.error('[Import] adapter failed:', err.message) } if (adapted) break } }
   let data
   try {
-    const modelOut = adapted && adapted.services.length && adapted.hours ? {} : await extract(page.finalUrl || url, parts)
+    // Extra pages (platform /services pages, or discovered subpages on an own site) feed the model.
+    let extraParts = []
+    if (adapted?._extraHtml?.length) extraParts = adapted._extraHtml.map(h => dissect(h, page.finalUrl || url))
+    else if (!adapted && !/booksy|fresha|styleseat|glossgenius|squareup/i.test(url)) { const sub = await discoverSubpages(page.body, page.finalUrl || url); extraParts = sub.map(h => dissect(h, page.finalUrl || url)) }
+    if (extraParts.length) { parts.text = [parts.text, ...extraParts.map(p => p.text)].join('\n\n----- next page -----\n\n').slice(0, MAX_TEXT * 2); parts.blobs.push(...extraParts.flatMap(p => p.blobs)); parts.jsonld.push(...extraParts.flatMap(p => p.jsonld)); extraParts.forEach(p => parts.images.push(...p.images)) }
+    if (adapted) delete adapted._extraHtml
+    const modelOut = adapted && adapted.services?.length && adapted.hours ? {} : await extract(page.finalUrl || url, parts)
     const merged = { ...modelOut, ...(adapted || {}) }
     for (const k of ['about', 'tagline', 'policies', 'business_type', 'address', 'city']) if (!merged[k] && modelOut[k]) merged[k] = modelOut[k]
-    if (adapted && !adapted.services.length && modelOut.services?.length) merged.services = modelOut.services
+    if (adapted && !(adapted.services || []).length && modelOut.services?.length) merged.services = modelOut.services
     if (adapted && !adapted.hours && modelOut.hours) merged.hours = modelOut.hours
     if (adapted && !adapted.photos?.length && modelOut.photos?.length) merged.photos = modelOut.photos
     data = clean(merged, page.finalUrl || url)
