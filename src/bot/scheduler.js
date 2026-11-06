@@ -183,6 +183,9 @@ function startScheduler() {
 
   // Follow-ups — check every hour
   setInterval(() => sendFollowUps().catch(console.error), 60 * 60 * 1000)
+  // v205: text-first client reviews, ~2h after each appointment ends (src/bot/reviews.js)
+  setInterval(() => require('./reviews').sendReviewRequests().catch(e => console.error('[Reviews]', e.message)), 60 * 60 * 1000)
+  setTimeout(() => require('./reviews').sendReviewRequests().catch(e => console.error('[Reviews]', e.message)), 90 * 1000)
 
   // Daily digest — check every 10 minutes for accuracy
   setInterval(() => sendDailyDigests().catch(console.error), 10 * 60 * 1000)

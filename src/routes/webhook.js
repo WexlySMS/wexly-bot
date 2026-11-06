@@ -487,6 +487,12 @@ router.post('/sms', validateTwilio, async (req, res) => {
       } catch (e) { console.error('[Deposit] manual PAID check failed:', e.message) }
     }
 
+    // ── Client review reply (v205) ───────────────────────────────────────────
+    // "4" / "5 stars" / a few words after we asked. Deterministic, before the model.
+    try {
+      if (await require('../bot/reviews').handleCustomerReply(business, customerPhone, incomingText)) { console.log(`[Reviews] reply from ${customerPhone} recorded for ${business.business_name}`); return }
+    } catch (e) { console.error('[Reviews] reply check failed:', e.message) }
+
     // ── SMS tip prompt reply (🔒 Entry 56) ──────────────────────────────────
     // If the owner just checked this customer out and we're waiting on a tip
     // answer, handle it here — BEFORE the paused/manual-mode gates, because the

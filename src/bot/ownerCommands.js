@@ -261,6 +261,18 @@ const OWNER_TOOLS = [
     }
   },
   {
+    name: 'manage_reviews',
+    description: 'Client reviews on the booking page. action=hide takes a client\'s review off the page ("hide Sarah\'s review", "take down the review from Sarah"); action=show puts it back or publishes private feedback ("show Sarah\'s review"); action=list reads the latest reviews and average ("how are my reviews", "any new reviews"); action=ask_off / ask_on stops or restarts asking clients for ratings after appointments; action=show_off / show_on hides or shows ALL reviews on the booking page.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['hide', 'show', 'list', 'ask_off', 'ask_on', 'show_off', 'show_on'] },
+        customer_name: { type: 'string', description: 'Client name for hide/show' }
+      },
+      required: ['action']
+    }
+  },
+  {
     name: 'set_deposit_method',
     description: 'Set how deposits are collected. Use when the owner says "connect stripe", "set up stripe for deposits", "use my venmo for deposits: venmo.com/x", "my payment link is ...", "deposits go through square: <link>", "turn off deposits". method=stripe texts them a Stripe connect link; method=link saves their payment URL (clients pay there, owner confirms each); method=off clears the link.',
     input_schema: {
@@ -1037,6 +1049,19 @@ async function executeOwnerTool(toolName, input, business) {
       if (patch.duration_mins) what.push(`now ${patch.duration_mins} min`)
       if ('deposit_amount' in patch) what.push(patch.deposit_amount ? `deposit set to $${patch.deposit_amount}` : 'deposit removed')
       return `Done. ${names.charAt(0).toUpperCase() + names.slice(1)}: ${what.join(', ')}.`
+    }
+
+    case 'manage_reviews': {
+      const R = require('./reviews')
+      if (input.action === 'hide' || input.action === 'show') {
+        if (!input.customer_name) return `Whose review? For example "hide Sarah's review".`
+        return await R.setVisibility(business, input.customer_name, input.action === 'hide')
+      }
+      if (input.action === 'list') return await R.summary(business)
+      const patch = input.action === 'ask_off' ? { reviews_ask_enabled: false } : input.action === 'ask_on' ? { reviews_ask_enabled: true } : input.action === 'show_off' ? { reviews_show_enabled: false } : { reviews_show_enabled: true }
+      const { error } = await supabase.from('businesses').update(patch).eq('id', business.id)
+      if (error) return `I couldn't change that just now.`
+      return { ask_off: `Okay, I'll stop asking clients for ratings after appointments.`, ask_on: `Done, I'll ask clients for a rating a couple of hours after each appointment.`, show_off: `Reviews are hidden from your booking page.`, show_on: `Reviews are showing on your booking page again.` }[input.action]
     }
 
     case 'set_deposit_method': {

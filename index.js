@@ -2695,7 +2695,8 @@ app.get('/public/profile-v2/:slug', async (req, res) => {
     // v202 columns (profile_cover_url, profile_about, profile_policies,
     // profile_accent) may not exist yet if the migration hasn't run; fall back.
     const base = 'id, business_name, business_type, business_type_custom, logo_url, sms_number, hours, timezone, address, profile_description, profile_photos, profile_social, profile_theme, profile_enabled, stripe_account_connected'
-    let q = await supabase.from('businesses').select(base + ', profile_cover_url, profile_about, profile_policies, profile_accent, profile_reviews').eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
+    let q = await supabase.from('businesses').select(base + ', profile_cover_url, profile_about, profile_policies, profile_accent, profile_reviews, reviews_show_enabled').eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
+    if (q.error && /reviews_show_enabled/i.test(q.error.message)) q = await supabase.from('businesses').select(base + ', profile_cover_url, profile_about, profile_policies, profile_accent, profile_reviews').eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
     if (q.error && /column|42703/i.test(q.error.message + q.error.code)) q = await supabase.from('businesses').select(base).eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
     const biz = q.data
 
@@ -2726,6 +2727,24 @@ app.get('/public/profile-v2/:slug', async (req, res) => {
       normalizedHours = rawHours
     }
 
+    // v205: merge text-collected reviews (public.reviews, published) with any imported ones
+    let reviewsOut = biz.profile_reviews || null
+    try {
+      const native = biz.reviews_show_enabled === false ? [] : await require('./src/bot/reviews').publicReviews(biz.id)
+      if (biz.reviews_show_enabled === false) reviewsOut = null
+      else if (native.length) {
+        const imported = (reviewsOut && Array.isArray(reviewsOut.items)) ? reviewsOut.items : []
+        const all = [...native, ...imported]
+        const rated = all.filter(r => r.rating)
+        const impCount = Number(reviewsOut?.count || imported.length) || 0
+        const impAvg = Number(reviewsOut?.rating || 0) || 0
+        const nativeAvg = native.reduce((a, r) => a + (r.rating || 0), 0) / native.length
+        const count = native.length + impCount
+        const rating = count ? ((nativeAvg * native.length + impAvg * impCount) / count) : (rated.length ? rated.reduce((a, r) => a + r.rating, 0) / rated.length : null)
+        reviewsOut = { source: reviewsOut?.source || 'Wexly', rating: rating ? Number(rating.toFixed(1)) : null, count, items: all.filter(r => r.text).slice(0, 40) }
+      }
+    } catch (e) { console.error('[Public Profile] reviews merge failed:', e.message) }
+
     res.json({
       name: biz.business_name,
       type: displayType,
@@ -2743,7 +2762,7 @@ app.get('/public/profile-v2/:slug', async (req, res) => {
       address: biz.address || null,
       policies: biz.profile_policies || null,
       accent: biz.profile_accent || null,
-      reviews: biz.profile_reviews || null,
+      reviews: reviewsOut,
       depositsEnabled: biz.stripe_account_connected || false,
       services: (services.data || [])
         .filter(s => s.active !== false) // only filter if active column exists and is false
