@@ -471,54 +471,85 @@ app.post('/admin/push-test', requireAuth, async (req, res) => {
 //   5. delete the Supabase auth user (signs them out everywhere)
 // Each step logs and continues so a partial failure never leaves a half-deleted
 // account billing them: Stripe and Twilio go first on purpose.
+// v204: shared by the self-serve route below and the admin wipe. Returns
+// { ok, log } and never throws part-way: Stripe and Twilio go first so a
+// partial failure can't leave a deleted business still billing someone.
+async function wipeBusiness(businessId, biz) {
+  const lines = []
+  const log = (m) => { lines.push(m); console.log(`[AccountDelete ${businessId}] ${m}`) }
+  // 1. Stripe
+  if (biz.stripe_subscription_id) {
+    try {
+      const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
+      await stripe.subscriptions.cancel(biz.stripe_subscription_id, { prorate: false })
+      log('stripe subscription cancelled')
+    } catch (e) { log('stripe cancel failed (continuing): ' + e.message) }
+  }
+  // 2. Twilio number goes back to the warm pool (kept, not released)
+  try { const { releaseNumberFromBusiness } = require('./src/utils/twilioManager'); await releaseNumberFromBusiness(businessId); log('number returned to pool') }
+  catch (e) { log('number release failed (continuing): ' + e.message) }
+  // 3. Uploaded images (cover, logo, work photos) in storage
+  try {
+    const { data: files } = await supabase.storage.from('profile-photos').list(businessId, { limit: 200 })
+    if (files?.length) { await supabase.storage.from('profile-photos').remove(files.map(f => `${businessId}/${f.name}`)); log(`${files.length} photo(s) removed`) }
+  } catch (e) { log('photo cleanup failed (continuing): ' + e.message) }
+  // 4. Child tables (any that don't exist or don't have business_id just error quietly)
+  const CHILD_TABLES = ['push_tokens','pending_tip_invoices','transactions','appointments','conversation_sessions','customers',
+    'blocked_dates','services','service_bundles','products','promotions','faqs','followup_sequences','waitlist',
+    'intake_responses','intake_form_questions','intake_form_services','intake_forms','qualification_questions',
+    'sms_group_broadcasts','sms_group_members','sms_groups','sms_campaigns','email_campaigns','digest_log',
+    'short_links','setup_calls','referral_credits','referral_payouts','compliance_violations','pending_leads','demo_leads','email_events','tracking_pixels']
+  for (const t of CHILD_TABLES) {
+    const { error } = await supabase.from(t).delete().eq('business_id', businessId)
+    if (error && !/does not exist|column .* does not exist/i.test(error.message)) log(`delete ${t}: ${error.message}`)
+  }
+  // 5. Business
+  const { error: bizErr } = await supabase.from('businesses').delete().eq('id', businessId)
+  if (bizErr) { log('business delete failed: ' + bizErr.message); return { ok: false, error: bizErr.message, log: lines } }
+  // 6. Auth user (only if they have no other business), so the email can sign up fresh
+  if (biz.user_id) {
+    const { data: others } = await supabase.from('businesses').select('id').eq('user_id', biz.user_id).limit(1)
+    if (!others?.length) {
+      try { await supabase.auth.admin.deleteUser(biz.user_id); log('auth user deleted') }
+      catch (e) { log('auth user delete failed: ' + e.message) }
+    }
+  }
+  log(`DONE: ${biz.business_name} (${biz.email})`)
+  return { ok: true, log: lines }
+}
+
 app.post('/account/delete', requireBusinessAuth, async (req, res) => {
   const { businessId, confirm } = req.body
   if (!businessId || confirm !== 'DELETE') return res.status(400).json({ error: 'Type DELETE to confirm' })
-  const log = (m) => console.log(`[AccountDelete ${businessId}] ${m}`)
   try {
     const { data: biz } = await supabase.from('businesses')
       .select('id, user_id, business_name, email, stripe_subscription_id, stripe_customer_id, sms_number')
       .eq('id', businessId).maybeSingle()
     if (!biz) return res.status(404).json({ error: 'Business not found' })
     if (biz.user_id !== req.userId) return res.status(403).json({ error: 'Not your business' })
-
-    // 1. Stripe
-    if (biz.stripe_subscription_id) {
-      try {
-        const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
-        await stripe.subscriptions.cancel(biz.stripe_subscription_id, { prorate: false })
-        log('stripe subscription cancelled')
-      } catch (e) { log('stripe cancel failed (continuing): ' + e.message) }
-    }
-    // 2. Twilio
-    try { const { releaseNumberFromBusiness } = require('./src/utils/twilioManager'); await releaseNumberFromBusiness(businessId); log('number released') }
-    catch (e) { log('number release failed (continuing): ' + e.message) }
-
-    // 3. Child tables (any that don't exist or don't have business_id just error quietly)
-    const CHILD_TABLES = ['push_tokens','pending_tip_invoices','transactions','appointments','conversation_sessions','customers',
-      'blocked_dates','services','service_bundles','products','promotions','faqs','followup_sequences','waitlist',
-      'intake_responses','intake_form_questions','intake_form_services','intake_forms','qualification_questions',
-      'sms_group_broadcasts','sms_group_members','sms_groups','sms_campaigns','email_campaigns','digest_log',
-      'short_links','setup_calls','referral_credits','referral_payouts','compliance_violations']
-    for (const t of CHILD_TABLES) {
-      const { error } = await supabase.from(t).delete().eq('business_id', businessId)
-      if (error && !/does not exist|column .* does not exist/i.test(error.message)) log(`delete ${t}: ${error.message}`)
-    }
-    // 4. Business
-    const { error: bizErr } = await supabase.from('businesses').delete().eq('id', businessId)
-    if (bizErr) { log('business delete failed: ' + bizErr.message); return res.status(500).json({ error: 'Could not delete business: ' + bizErr.message }) }
-    // 5. Auth user (only if they have no other business)
-    const { data: others } = await supabase.from('businesses').select('id').eq('user_id', req.userId).limit(1)
-    if (!others?.length) {
-      try { await supabase.auth.admin.deleteUser(req.userId); log('auth user deleted') }
-      catch (e) { log('auth user delete failed: ' + e.message) }
-    }
-    log(`DONE — ${biz.business_name} (${biz.email})`)
+    const r = await wipeBusiness(businessId, biz)
+    if (!r.ok) return res.status(500).json({ error: 'Could not delete business: ' + r.error })
     res.json({ success: true })
   } catch (err) {
     console.error('[AccountDelete] error:', err.message)
     res.status(500).json({ error: err.message })
   }
+})
+
+// Admin: wipe a business completely (test accounts, re-signups). Same routine
+// as the self-serve delete; the number goes back into the warm pool.
+app.post('/admin/business/:id/wipe', async (req, res) => {
+  const id = adminBiz(req, res); if (!id) return
+  if (req.body.confirm !== 'DELETE') return res.status(400).json({ error: 'Send confirm: "DELETE"' })
+  try {
+    const { data: biz } = await adminSb().from('businesses')
+      .select('id, user_id, business_name, email, stripe_subscription_id, stripe_customer_id, sms_number')
+      .eq('id', id).maybeSingle()
+    if (!biz) return res.status(404).json({ error: 'Business not found' })
+    const r = await wipeBusiness(id, biz)
+    if (!r.ok) return res.status(500).json({ error: r.error, log: r.log })
+    res.json({ success: true, log: r.log, number: biz.sms_number })
+  } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
 // Public endpoint used by signup.html for live feedback as the user types.
