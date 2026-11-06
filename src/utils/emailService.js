@@ -59,6 +59,11 @@ ${EMAIL_HEADER}
 <div style="padding:24px 40px;background:#FEF9EE;border-bottom:1px solid rgba(15,15,14,0.08);">
 <p style="font-size:14px;color:#92400E;margin:0;">⏰ <strong>14-day free trial started today.</strong> No charge until day 15.</p>
 </div>
+<div style="padding:22px 40px;background:#0F0F0E;text-align:center;">
+<p style="font-size:12px;font-weight:500;letter-spacing:0.1em;text-transform:uppercase;color:#4ade80;margin:0 0 6px;">Get the iPhone app</p>
+<p style="font-size:14px;color:rgba(255,255,255,0.72);margin:0 0 14px;line-height:1.5;">Push notifications the moment someone books, cancels, or needs you. Your calendar and every conversation, in your pocket.</p>
+<a href="https://apps.apple.com/app/id6828181888" style="display:inline-block;background:#fff;color:#0F0F0E;padding:11px 22px;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600;">Download on the App Store</a>
+</div>
 <div style="padding:32px 40px;text-align:center;">
 <a href="${SITE}/dashboard.html" style="display:inline-block;background:#0D9488;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-size:15px;font-weight:500;">Go to your dashboard →</a>
 </div>
@@ -100,7 +105,7 @@ async function sendTrialConfirmationEmail({ email, firstName, businessName, tria
   const planPrice = plan === 'pro' ? '$199' : '$149'
   await sendEmail({
     from: FROM_BILLING, replyTo: 'billing@getwexly.com', to: email,
-    subject: `Your Wexly trial has started — here's what to expect`,
+    subject: `Your Wexly trial has started. Here is what to expect`,
     html: `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#F3F2EE;font-family:Helvetica,Arial,sans-serif;">
 <div style="max-width:560px;margin:40px auto;background:#FAFAF8;border-radius:16px;overflow:hidden;border:1px solid rgba(15,15,14,0.08);">
 ${EMAIL_HEADER}
@@ -118,6 +123,11 @@ ${EMAIL_HEADER}
 <div style="text-align:center;">
 <a href="${SITE}/dashboard.html" style="display:inline-block;background:#0D9488;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-size:15px;font-weight:500;">Go to your dashboard →</a>
 </div>
+</div>
+<div style="padding:22px 40px;background:#0F0F0E;text-align:center;">
+<p style="font-size:12px;font-weight:500;letter-spacing:0.1em;text-transform:uppercase;color:#4ade80;margin:0 0 6px;">Get the iPhone app</p>
+<p style="font-size:14px;color:rgba(255,255,255,0.72);margin:0 0 14px;line-height:1.5;">Push notifications the moment someone books, cancels, or needs you. Your calendar and every conversation, in your pocket.</p>
+<a href="https://apps.apple.com/app/id6828181888" style="display:inline-block;background:#fff;color:#0F0F0E;padding:11px 22px;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600;">Download on the App Store</a>
 </div>
 ${EMAIL_FOOTER}
 </div></body></html>`
