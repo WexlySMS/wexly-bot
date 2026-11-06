@@ -62,7 +62,7 @@ ${EMAIL_HEADER}
 <div style="padding:22px 40px;background:#0F0F0E;text-align:center;">
 <p style="font-size:12px;font-weight:500;letter-spacing:0.1em;text-transform:uppercase;color:#4ade80;margin:0 0 6px;">Get the iPhone app</p>
 <p style="font-size:14px;color:rgba(255,255,255,0.72);margin:0 0 14px;line-height:1.5;">Push notifications the moment someone books, cancels, or needs you. Your calendar and every conversation, in your pocket.</p>
-<a href="https://apps.apple.com/app/id6828181888" style="display:inline-block;background:#fff;color:#0F0F0E;padding:11px 22px;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600;">Download on the App Store</a>
+<a href="https://apps.apple.com/app/id6828181888" style="display:inline-block;line-height:0;"><img src="${SITE}/app-store-badge.png" alt="Download on the App Store" width="162" height="48" style="display:block;height:48px;width:auto;border:0;"></a>
 </div>
 <div style="padding:32px 40px;text-align:center;">
 <a href="${SITE}/dashboard.html" style="display:inline-block;background:#0D9488;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-size:15px;font-weight:500;">Go to your dashboard →</a>
@@ -127,7 +127,7 @@ ${EMAIL_HEADER}
 <div style="padding:22px 40px;background:#0F0F0E;text-align:center;">
 <p style="font-size:12px;font-weight:500;letter-spacing:0.1em;text-transform:uppercase;color:#4ade80;margin:0 0 6px;">Get the iPhone app</p>
 <p style="font-size:14px;color:rgba(255,255,255,0.72);margin:0 0 14px;line-height:1.5;">Push notifications the moment someone books, cancels, or needs you. Your calendar and every conversation, in your pocket.</p>
-<a href="https://apps.apple.com/app/id6828181888" style="display:inline-block;background:#fff;color:#0F0F0E;padding:11px 22px;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600;">Download on the App Store</a>
+<a href="https://apps.apple.com/app/id6828181888" style="display:inline-block;line-height:0;"><img src="${SITE}/app-store-badge.png" alt="Download on the App Store" width="162" height="48" style="display:block;height:48px;width:auto;border:0;"></a>
 </div>
 ${EMAIL_FOOTER}
 </div></body></html>`
