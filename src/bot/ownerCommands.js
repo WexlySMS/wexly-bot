@@ -245,6 +245,22 @@ const OWNER_TOOLS = [
     }
   },
   {
+    name: 'update_services',
+    description: 'Change existing services: price, duration, whether booking needs the owner\'s approval, a deposit, or remove a service. Use for "make Balayage require approval", "Balayage needs my approval", "all services need approval", "make everything instant book", "Balayage is $240 now", "haircut takes 45 min", "remove Bang Trim", "Botox needs a quote first". Match the service by name (partial is fine) or use "all".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        services: { type: 'array', items: { type: 'string' }, description: 'Service names to change (partial names ok), or ["all"] for every service' },
+        booking_mode: { type: 'string', enum: ['instant', 'request', 'quote'], description: 'instant = books straight onto the calendar; request = the owner approves each booking first; quote = owner sends a price first' },
+        price: { type: 'number', description: 'New price in dollars' },
+        duration_mins: { type: 'number', description: 'New length in minutes' },
+        deposit_amount: { type: 'number', description: 'Deposit in dollars; 0 removes the deposit' },
+        remove: { type: 'boolean', description: 'true to remove the service from the menu' }
+      },
+      required: ['services']
+    }
+  },
+  {
     name: 'update_inventory',
     description: 'Update the stock quantity of a product. Use when owner says things like "added 10 Olaplex", "restocked shampoo 24 units", "we got 6 more nail polish in", "update inventory: Olaplex 15".',
     input_schema: {
@@ -970,6 +986,38 @@ async function executeOwnerTool(toolName, input, business) {
       if (updated.length) parts.push(`Updated: ${fmt(updated)}`)
       if (!parts.length) return `I couldn't save those. Try again like "Haircut 45 min $60".`
       return `✅ ${parts.join('. ')}. Clients can book these now. You can fine-tune deposits and staff in your dashboard under Services.`
+    }
+
+    case 'update_services': {
+      const wanted = (Array.isArray(input.services) ? input.services : [input.services]).filter(Boolean).map(x => String(x).trim().toLowerCase())
+      if (!wanted.length) return `Which service? For example "make Balayage require approval".`
+      const { data: all } = await supabase.from('services').select('id, name, booking_mode, price, duration_mins').eq('business_id', business.id).neq('active', false)
+      const isAll = wanted.includes('all') || wanted.includes('everything') || wanted.includes('all services')
+      const targets = isAll ? (all || []) : (all || []).filter(sv => wanted.some(w => sv.name.toLowerCase() === w || sv.name.toLowerCase().includes(w) || w.includes(sv.name.toLowerCase())))
+      if (!targets.length) return `I couldn't find ${wanted.join(', ')} in your services. Your services are: ${(all || []).map(sv => sv.name).join(', ')}.`
+      const patch = {}
+      // Same gate as the dashboard: approval and quote modes are Standard and up.
+      if (['request', 'quote'].includes(input.booking_mode) && String(business.plan || '').toLowerCase() === 'solo') {
+        return `Approval and quote modes are part of the Standard plan. On Solo every service books instantly. You can upgrade any time in your dashboard under Billing.`
+      }
+      if (['instant', 'request', 'quote'].includes(input.booking_mode)) patch.booking_mode = input.booking_mode
+      if (input.price !== undefined && input.price !== null && !isNaN(Number(input.price))) patch.price = Math.max(0, Number(input.price))
+      if (input.duration_mins) patch.duration_mins = Math.min(Math.max(parseInt(input.duration_mins) || 60, 5), 24 * 60)
+      if (input.deposit_amount !== undefined && input.deposit_amount !== null && !isNaN(Number(input.deposit_amount))) patch.deposit_amount = Number(input.deposit_amount) > 0 ? Number(input.deposit_amount) : null
+      if (input.remove) patch.active = false
+      if (!Object.keys(patch).length) return `What should change about ${targets.map(t => t.name).join(', ')}? Price, length, approval, deposit, or remove it.`
+      const { error } = await supabase.from('services').update(patch).in('id', targets.map(t => t.id))
+      if (error) { console.error('[Owner] update_services failed:', error.message); return `I couldn't save that change. Try again in a moment.` }
+      const names = isAll ? `all ${targets.length} services` : targets.map(t => t.name).join(', ')
+      const what = []
+      if (patch.active === false) what.push('removed from your menu')
+      if (patch.booking_mode === 'request') what.push('now need your approval before they go on the calendar')
+      if (patch.booking_mode === 'instant') what.push('now book instantly')
+      if (patch.booking_mode === 'quote') what.push('now get a quote from you first')
+      if (patch.price !== undefined) what.push(`now $${patch.price}`)
+      if (patch.duration_mins) what.push(`now ${patch.duration_mins} min`)
+      if ('deposit_amount' in patch) what.push(patch.deposit_amount ? `deposit set to $${patch.deposit_amount}` : 'deposit removed')
+      return `Done. ${names.charAt(0).toUpperCase() + names.slice(1)}: ${what.join(', ')}.`
     }
 
     case 'update_inventory': {
