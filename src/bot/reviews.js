@@ -54,9 +54,12 @@ async function sendReviewRequests() {
     const { data: existing, error: e2 } = await supabase.from('reviews').select('id').eq('appointment_id', a.id).maybeSingle()
     if (e2) { if (missingTable(e2)) return; continue }
     if (existing) continue
-    // one ask per client per 14 days, even across appointments
-    const { data: recent } = await supabase.from('reviews').select('id').eq('business_id', a.business_id).eq('customer_phone', a.customer_phone).gte('requested_at', new Date(now - 14 * 86400000).toISOString()).limit(1)
-    if (recent?.length) { await supabase.from('reviews').insert({ business_id: a.business_id, appointment_id: a.id, customer_phone: a.customer_phone, customer_name: a.customer_name, service_name: a.service_name, status: 'skipped' }); continue }
+    // Never ask a client who has already left a rating for this business. Someone who
+    // ignored the ask is asked again no sooner than 60 days later.
+    const { data: prior } = await supabase.from('reviews').select('rating, requested_at').eq('business_id', a.business_id).eq('customer_phone', a.customer_phone).neq('status', 'skipped').order('requested_at', { ascending: false }).limit(5)
+    const rated = (prior || []).some(r => r.rating)
+    const askedRecently = (prior || []).some(r => !r.rating && now - new Date(r.requested_at).getTime() < 60 * 86400000)
+    if (rated || askedRecently) { await supabase.from('reviews').insert({ business_id: a.business_id, appointment_id: a.id, customer_phone: a.customer_phone, customer_name: a.customer_name, service_name: a.service_name, status: 'skipped' }); continue }
     const { error: insErr } = await supabase.from('reviews').insert({ business_id: a.business_id, appointment_id: a.id, customer_phone: a.customer_phone, customer_name: a.customer_name, service_name: a.service_name, status: 'requested' })
     if (insErr) continue
     try {
