@@ -8,13 +8,15 @@ const supabase = createClient(
 
 // ── Business lookup ───────────────────────────────────────────────────────────
 // Called on every incoming SMS — finds which business owns that Twilio number
-async function getBusinessBySmsNumber(smsNumber) {
-  const { data, error } = await supabase
-    .from('businesses')
-    .select('*')
-    .eq('sms_number', smsNumber)
-    .eq('active', true)
-    .single()
+// v204: includePaused lets the SMS webhook find a business whose bot is paused
+// (active=false). Before, a paused business was invisible here, so EVERY text to
+// its number, the owner's included, got the "technical difficulties" reply and
+// the owner could not resume by text. The webhook's own paused gate decides what
+// customers get (silence); owner commands always work.
+async function getBusinessBySmsNumber(smsNumber, { includePaused = false } = {}) {
+  let q = supabase.from('businesses').select('*').eq('sms_number', smsNumber)
+  if (!includePaused) q = q.eq('active', true)
+  const { data, error } = await q.maybeSingle()
   if (error) return null
   return data
 }

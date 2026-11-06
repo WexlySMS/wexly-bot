@@ -139,7 +139,7 @@ const OWNER_TOOLS = [
   },
   {
     name: 'confirm_deposit_waiver',
-    description: 'Manually confirm an appointment that is waiting for a deposit — waives the deposit requirement. Use when owner says "confirm [name]", "approve [name]", "let [name] through without deposit", etc.',
+    description: 'Confirm an appointment that is waiting for a deposit: the owner received the deposit (Venmo, Zelle, cash, any payment link) or wants to waive it. Use when owner says "confirm [name]", "[name] paid", "got the deposit from [name]", "approve [name]", "let [name] through without deposit".',
     input_schema: {
       type: 'object',
       properties: {
@@ -258,6 +258,18 @@ const OWNER_TOOLS = [
         remove: { type: 'boolean', description: 'true to remove the service from the menu' }
       },
       required: ['services']
+    }
+  },
+  {
+    name: 'set_deposit_method',
+    description: 'Set how deposits are collected. Use when the owner says "connect stripe", "set up stripe for deposits", "use my venmo for deposits: venmo.com/x", "my payment link is ...", "deposits go through square: <link>", "turn off deposits". method=stripe texts them a Stripe connect link; method=link saves their payment URL (clients pay there, owner confirms each); method=off clears the link.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        method: { type: 'string', enum: ['stripe', 'link', 'off'] },
+        payment_link: { type: 'string', description: 'The payment URL when method=link' }
+      },
+      required: ['method']
     }
   },
   {
@@ -765,7 +777,7 @@ async function executeOwnerTool(toolName, input, business) {
         .select('*')
         .eq('business_id', business.id)
         .eq('status', 'deposit_pending')
-        .eq('deposit_status', 'pending')
+        .in('deposit_status', ['pending', 'reported'])
 
       if (!appts?.length) return `No appointments currently waiting on a deposit.`
 
@@ -775,8 +787,9 @@ async function executeOwnerTool(toolName, input, business) {
         return `Couldn't find "${input.customer_name}" waiting on a deposit. Pending deposits: ${names}`
       }
 
+      // A manual (payment-link) deposit the owner confirms counts as paid; Stripe ones confirmed by hand are waived.
       await supabase.from('appointments')
-        .update({ status: 'confirmed', deposit_status: 'waived', deposit_expires_at: null })
+        .update({ status: 'confirmed', deposit_status: match.deposit_payment_mode === 'manual' ? 'paid' : 'waived', deposit_expires_at: null })
         .eq('id', match.id)
 
       // Text the customer they're confirmed
@@ -985,7 +998,13 @@ async function executeOwnerTool(toolName, input, business) {
       if (added.length) parts.push(`Added: ${fmt(added)}`)
       if (updated.length) parts.push(`Updated: ${fmt(updated)}`)
       if (!parts.length) return `I couldn't save those. Try again like "Haircut 45 min $60".`
-      return `✅ ${parts.join('. ')}. Clients can book these now. You can fine-tune deposits and staff in your dashboard under Services.`
+      // v204: first services typed in by hand start the same setup checklist an import does
+      // (deposits, how to collect them, hours, staff), a few seconds after this reply lands.
+      const ob = business.onboarding || {}
+      if (added.length && !ob.setup_complete_at && !ob.pending_question) {
+        setTimeout(() => { try { require('./trialOnboarding').advanceSetup(business, 'import_mode').catch(e => console.error('[Setup] advance after add_services failed:', e.message)) } catch (e) { console.error('[Setup] advance failed:', e.message) } }, 4000)
+      }
+      return `✅ ${parts.join('. ')}. Clients can book these now.`
     }
 
     case 'update_services': {
@@ -1018,6 +1037,28 @@ async function executeOwnerTool(toolName, input, business) {
       if (patch.duration_mins) what.push(`now ${patch.duration_mins} min`)
       if ('deposit_amount' in patch) what.push(patch.deposit_amount ? `deposit set to $${patch.deposit_amount}` : 'deposit removed')
       return `Done. ${names.charAt(0).toUpperCase() + names.slice(1)}: ${what.join(', ')}.`
+    }
+
+    case 'set_deposit_method': {
+      if (input.method === 'stripe') {
+        try {
+          const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
+          const state = Buffer.from(JSON.stringify({ businessId: business.id })).toString('base64')
+          let url = stripe.oauth.authorizeUrl({ response_type: 'code', client_id: process.env.STRIPE_CONNECT_CLIENT_ID, scope: 'read_write', state, redirect_uri: `${(process.env.BOT_URL || 'https://wexly-bot.onrender.com').replace(/\/$/, '')}/stripe-connect/callback` })
+          try { url = await require('../utils/shortener').shortenUrl(url, { businessId: business.id }) } catch {}
+          return `Here's your Stripe link: ${url} About two minutes. Once connected, deposits are charged by card and bookings confirm on their own. I'll text you when it's done.`
+        } catch (e) { console.error('[Owner] stripe link failed:', e.message); return `I couldn't make your Stripe link just now. You can connect Stripe in your dashboard under Billing.` }
+      }
+      if (input.method === 'link') {
+        const raw = String(input.payment_link || '').trim()
+        if (!raw) return `Send me the link clients should pay at, like venmo.com/yourname or a Square or PayPal link.`
+        const link = /^https?:\/\//i.test(raw) ? raw : 'https://' + raw
+        const { error: e2 } = await supabase.from('businesses').update({ payment_link: link }).eq('id', business.id)
+        if (e2) return `I couldn't save that link. Try again in a moment.`
+        return `Saved. For services with a deposit, clients get ${link} and I'll text you when they say they've paid. Reply "confirm <name>" to lock it in.` + (business.stripe_account_connected ? ` Stripe is connected too, so card deposits still go through Stripe automatically.` : '')
+      }
+      await supabase.from('businesses').update({ payment_link: null }).eq('id', business.id)
+      return `Payment link removed.` + (business.stripe_account_connected ? ` Deposits still run through Stripe.` : ` Deposits are off until you connect Stripe or give me a new link.`)
     }
 
     case 'update_inventory': {

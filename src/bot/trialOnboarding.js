@@ -344,37 +344,222 @@ async function announceImport(biz, result, { url = null } = {}) {
 
 const PENDING_QUESTION_TTL_MS = 48 * 60 * 60 * 1000
 const YES_RE = /^\s*(y|yes|yeah|yep|yup|ya|sure|ok|okay|correct|instant|instantly|all|do it|sounds good|looks good|perfect|yes please|yes all)\s*[.!]*\s*$/i
-const NO_RE  = /^\s*(n|no|nope|nah|approve|approval|approve first|request|requests|not yet|no thanks)\s*[.!]*\s*$/i
+const NO_RE  = /^\s*(n|no|nope|nah|approve|approval|approve first|request|requests|not yet|no thanks|none|skip)\s*[.!]*\s*$/i
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+// ── Setup checklist (v204) ────────────────────────────────────────────────────
+// After an import the bot walks the owner through everything a working account
+// needs, one text at a time, remembering where it is in onboarding.pending_question
+// so a restart or a day's gap changes nothing. Each step is skipped when the
+// account already has the answer (hours imported, Stripe connected, ...).
+// Order: import_mode → deposits → deposit_method → hours → staff → done.
+const SETUP_STEPS = ['import_mode', 'deposits', 'deposit_method', 'hours', 'staff']
+
+async function freshBiz(id) {
+  const { data } = await supabase.from('businesses').select('id, business_name, owner_name, owner_phone, sms_number, plan, hours, staff_members, payment_link, stripe_account_connected, stripe_account_id, profile_slug, onboarding, timezone').eq('id', id).maybeSingle()
+  return data
+}
+async function setPending(biz, kind, extra = {}) {
+  const { data } = await supabase.from('businesses').select('onboarding').eq('id', biz.id).maybeSingle()
+  const next = { ...(data?.onboarding || biz.onboarding || {}), ...extra }
+  if (kind) next.pending_question = { kind, at: new Date().toISOString() }
+  else delete next.pending_question
+  await supabase.from('businesses').update({ onboarding: next }).eq('id', biz.id)
+  return next
+}
+function stepNeeded(biz, services, step) {
+  const anyDeposit = services.some(sv => sv.deposit_amount && String(sv.deposit_amount).trim() !== '' && String(sv.deposit_amount) !== '0')
+  const hasHours = Array.isArray(biz.hours) && biz.hours.some(h => h && (h.open === true || (h.open && h.close)))
+  const hasStaff = Array.isArray(biz.staff_members) && biz.staff_members.some(st => st && st.name)
+  const hasDepositMethod = (biz.stripe_account_connected && biz.stripe_account_id) || /^https?:\/\//i.test(String(biz.payment_link || ''))
+  if (step === 'deposits') return services.length > 0
+  if (step === 'deposit_method') return anyDeposit && !hasDepositMethod
+  if (step === 'hours') return !hasHours
+  if (step === 'staff') return !hasStaff
+  return false
+}
+function questionFor(biz, step, services) {
+  const plan = String(biz.plan || '').toLowerCase()
+  switch (step) {
+    case 'deposits': return `Next: do any services need a deposit to book? Reply NO, or tell me which and how much, like "Balayage $50, Color $40" or "all $25".`
+    case 'deposit_method': return `How should deposits be collected? Reply STRIPE and I'll text you a link to connect your Stripe (clients pay by card and bookings confirm themselves), or paste your payment link (Venmo, Zelle, Square, PayPal) and I'll send that to clients and tell you when they say they've paid so you can confirm.`
+    case 'hours': return `What are your hours? Something like "Tue to Sat 9 to 6, closed Sun and Mon" is perfect.`
+    case 'staff': return `Last one: is it just you taking appointments? Reply JUST ME, or the names of everyone who does, like "Mia, Jordan".`
+    default: return null
+  }
+}
+// Move to the next step that still needs an answer; text the question or the wrap-up.
+async function advanceSetup(biz, fromStep) {
+  const b = await freshBiz(biz.id) || biz
+  const { data: services } = await supabase.from('services').select('id, name, deposit_amount, booking_mode').eq('business_id', b.id).neq('active', false)
+  const svcs = services || []
+  let i = SETUP_STEPS.indexOf(fromStep) + 1
+  for (; i < SETUP_STEPS.length; i++) if (stepNeeded(b, svcs, SETUP_STEPS[i])) break
+  if (i < SETUP_STEPS.length) {
+    const step = SETUP_STEPS[i]
+    const q = questionFor(b, step, svcs)
+    await setPending(b, step)
+    await sendSMS(b.sms_number, b.owner_phone, q)
+    try { require('./ownerCommands').noteOwnerOutbound(b.id, q) } catch {}
+    return q
+  }
+  // Done: everything a working account needs is in place.
+  const page = b.profile_slug ? `${SITE_URL}/book/${b.profile_slug}` : null
+  const deposits = svcs.filter(sv => sv.deposit_amount && String(sv.deposit_amount) !== '0').length
+  const bits = [`${svcs.length} service${svcs.length === 1 ? '' : 's'}`]
+  if (deposits) bits.push(`${deposits} with a deposit`)
+  if (Array.isArray(b.hours) && b.hours.some(h => h && h.open)) bits.push('hours')
+  if (Array.isArray(b.staff_members) && b.staff_members.some(st => st?.name)) bits.push(`${b.staff_members.filter(st => st?.name).length} staff`)
+  const msg = `You're all set: ${bits.join(', ')}.` + (page ? ` Your booking page: ${page}` : '') +
+    ` Put ${prettyNumber(b.sms_number)} on your Instagram and Google listing so clients text it. Anything you want changed, just tell me here, any time.`
+  await setPending(b, null, { setup_complete_at: new Date().toISOString() })
+  await sendSMS(b.sms_number, b.owner_phone, msg)
+  try { require('./ownerCommands').noteOwnerOutbound(b.id, msg) } catch {}
+  return msg
+}
+function prettyNumber(p) { const d = String(p || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : (p || 'your Wexly number') }
+
+// Parse "Balayage $50, Color $40" / "all $25" / "$25 for everything" into [{name, amount}] or {all: amount}
+function parseDeposits(text) {
+  const t = String(text || '').trim()
+  const allM = t.match(/\b(all|every(?:thing| service| one)?)\b[^$\d]*\$?\s*(\d+(?:\.\d+)?)/i) || t.match(/\$?\s*(\d+(?:\.\d+)?)\s*(?:for|on)\s+(?:all|every(?:thing| service)?)/i)
+  if (allM) return { all: parseFloat(allM[2] || allM[1]) }
+  const out = []
+  for (const part of t.split(/[,;\n]| and /i)) {
+    const m = part.match(/^\s*(.+?)\s*[:\-]?\s*\$\s*(\d+(?:\.\d+)?)\s*$/) || part.match(/^\s*\$\s*(\d+(?:\.\d+)?)\s+(?:for|on)\s+(.+?)\s*$/i) || part.match(/^\s*(.+?)\s+(\d+(?:\.\d+)?)\s*(?:dollars|bucks)?\s*$/i)
+    if (!m) continue
+    const name = (m[1].match(/^\d/) ? m[2] : m[1]).trim(), amount = parseFloat(m[1].match(/^\d/) ? m[1] : m[2])
+    if (name && amount > 0) out.push({ name, amount })
+  }
+  return out.length ? { items: out } : null
+}
+// Hours by model, into the same shape the importer writes: [{day:'Mon', open:true, from:'09:00', to:'18:00'}|{day, open:false}] x7, Sun first
+async function parseHours(text) {
+  const Anthropic = require('@anthropic-ai/sdk'); const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+  const r = await client.messages.create({ model: 'claude-sonnet-4-6', max_tokens: 600, tools: [{ name: 'save_hours', description: 'Save weekly hours', input_schema: { type: 'object', properties: { days: { type: 'array', minItems: 7, maxItems: 7, description: 'Exactly 7 entries, Sunday first', items: { type: 'object', properties: { open: { type: 'boolean' }, from: { type: 'string', description: 'HH:MM 24h' }, to: { type: 'string', description: 'HH:MM 24h' } }, required: ['open'] } } }, required: ['days'] } }], tool_choice: { type: 'tool', name: 'save_hours' },
+    messages: [{ role: 'user', content: `Business hours as the owner typed them: "${text}". Return 7 days, Sunday first. Days not mentioned as open are closed. "9 to 6" means 09:00 to 18:00.` }] })
+  const tu = r.content.find(c => c.type === 'tool_use'); const days = tu?.input?.days
+  if (!Array.isArray(days) || days.length !== 7) return null
+  const week = days.map((d, i) => (d.open && d.from && d.to) ? { day: DAY_NAMES[i], open: true, from: d.from, to: d.to } : { day: DAY_NAMES[i], open: false })
+  return week.some(d => d.open) ? week : null
+}
+function describeHours(week) {
+  return week.filter(d => d.open).map(d => `${d.day} ${to12(d.from)}-${to12(d.to)}`).join(', ')
+}
+function to12(hhmm) { const [h, m] = String(hhmm).split(':').map(Number); const hr = ((h + 11) % 12) + 1; return `${hr}${m ? ':' + String(m).padStart(2, '0') : ''}${h >= 12 ? 'pm' : 'am'}` }
+async function stripeConnectUrl(biz) {
+  const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
+  const state = Buffer.from(JSON.stringify({ businessId: biz.id })).toString('base64')
+  const url = stripe.oauth.authorizeUrl({ response_type: 'code', client_id: process.env.STRIPE_CONNECT_CLIENT_ID, scope: 'read_write', state, redirect_uri: `${BOT_URL}/stripe-connect/callback` })
+  try { const { shortenUrl } = require('../utils/shortener'); return await shortenUrl(url, { businessId: biz.id }) } catch { return url }
+}
 
 // Returns a reply string when the owner's text answers a question the bot is
 // waiting on; null means "not for me", and the normal owner handler runs.
-// Only short, bare replies are claimed, so "yes but make Balayage $240" still
-// reaches the model (with the question in its context) and the question stays open.
+// Only short, bare replies are claimed for yes/no steps, so "yes but make
+// Balayage $240" still reaches the model (with the question in its context).
 async function handlePendingOwnerReply(biz, text) {
   const ob = biz.onboarding || {}
   const pq = ob.pending_question
   if (!pq || !pq.kind) return null
-  const clear = async (extra = {}) => {
-    const { data } = await supabase.from('businesses').select('onboarding').eq('id', biz.id).maybeSingle()
-    const next = { ...(data?.onboarding || ob), ...extra }
-    delete next.pending_question
-    await supabase.from('businesses').update({ onboarding: next }).eq('id', biz.id)
-  }
-  if (pq.at && Date.now() - new Date(pq.at).getTime() > PENDING_QUESTION_TTL_MS) { await clear(); return null }
+  if (pq.at && Date.now() - new Date(pq.at).getTime() > PENDING_QUESTION_TTL_MS) { await setPending(biz, null); return null }
+  const t = String(text || '').trim()
+  const note = (m) => { try { require('./ownerCommands').noteOwnerOutbound(biz.id, m) } catch {} }
+  const say = async (m) => { await sendSMS(biz.sms_number, biz.owner_phone, m); note(m) }
 
   if (pq.kind === 'import_mode') {
-    const yes = YES_RE.test(text), no = NO_RE.test(text)
+    const yes = YES_RE.test(t), no = NO_RE.test(t)
     if (!yes && !no) return null
     const mode = yes ? 'instant' : 'request'
-    const { data: rows, error } = await supabase.from('services').update({ booking_mode: mode }).eq('business_id', biz.id).select('id')
-    if (error) { console.error('[Setup] booking_mode update failed:', error.message); return null }
-    await clear({ import_mode_at: new Date().toISOString(), import_mode: mode })
-    const n = rows?.length || pq.services || 0
-    const reply = yes
-      ? `Done. All ${n} services are instant book: a client texts, picks a time, and it goes straight on your calendar. If any should need your OK first, just tell me which.`
-      : `Done. Every booking request will come to you first, and nothing is confirmed until you approve it. If you want some services to book instantly later, just tell me which.`
-    try { require('./ownerCommands').noteOwnerOutbound(biz.id, reply) } catch {}
-    return reply
+    if (mode === 'request' && String(biz.plan || '').toLowerCase() === 'solo') {
+      await say(`Approval mode is part of the Standard plan, so on Solo every service books instantly for now. You can upgrade any time in your dashboard under Billing.`)
+    } else {
+      const { error } = await supabase.from('services').update({ booking_mode: mode }).eq('business_id', biz.id)
+      if (error) { console.error('[Setup] booking_mode update failed:', error.message); return null }
+      await say(yes ? `Done. Everything is instant book: a client texts, picks a time, and it goes straight on your calendar. If any should need your OK first, just tell me which.`
+                    : `Done. Every booking request comes to you first, and nothing is confirmed until you approve it.`)
+    }
+    await setPending(biz, null, { import_mode_at: new Date().toISOString(), import_mode: mode })
+    await advanceSetup(biz, 'import_mode')
+    return '__sent__'
+  }
+
+  if (pq.kind === 'deposits') {
+    if (NO_RE.test(t)) {
+      await say(`No deposits. You can add one any time, like "Balayage needs a $50 deposit".`)
+      await setPending(biz, null, { deposits_at: new Date().toISOString() })
+      await advanceSetup(biz, 'deposits'); return '__sent__'
+    }
+    const parsed = parseDeposits(t)
+    if (!parsed) return null  // let the model handle it; question stays open
+    const { data: services } = await supabase.from('services').select('id, name').eq('business_id', biz.id).neq('active', false)
+    const svcs = services || []
+    const applied = [], missed = []
+    if (parsed.all) {
+      await supabase.from('services').update({ deposit_amount: String(parsed.all) }).eq('business_id', biz.id)
+      applied.push(`all ${svcs.length} services $${parsed.all}`)
+    } else {
+      for (const it of parsed.items) {
+        const w = it.name.toLowerCase()
+        const hits = svcs.filter(sv => sv.name.toLowerCase() === w || sv.name.toLowerCase().includes(w) || w.includes(sv.name.toLowerCase()))
+        if (!hits.length) { missed.push(it.name); continue }
+        await supabase.from('services').update({ deposit_amount: String(it.amount) }).in('id', hits.map(h => h.id))
+        applied.push(`${hits.map(h => h.name).join(', ')} $${it.amount}`)
+      }
+    }
+    if (!applied.length) { await say(`I couldn't match ${missed.join(', ')} to your services. Your services: ${svcs.map(sv => sv.name).join(', ')}. Try again like "Balayage $50".`); return '__sent__' }
+    await say(`Deposits set: ${applied.join('; ')}.` + (missed.length ? ` I couldn't find ${missed.join(', ')}.` : ''))
+    await setPending(biz, null, { deposits_at: new Date().toISOString() })
+    await advanceSetup(biz, 'deposits'); return '__sent__'
+  }
+
+  if (pq.kind === 'deposit_method') {
+    const url = (t.match(/https?:\/\/\S+/i) || [])[0] || (t.match(/\b(?:venmo\.com|cash\.app|paypal\.me|square\.link|squareup\.com|zelle)\S*/i) || [])[0]
+    if (/^\s*stripe\s*[.!]*\s*$/i.test(t) || /\bconnect stripe\b/i.test(t)) {
+      try {
+        const link = await stripeConnectUrl(biz)
+        await say(`Here's your Stripe link: ${link} It takes about two minutes. Once it's connected, deposits are charged by card and bookings confirm on their own. I'll text you when it's done.`)
+        await setPending(biz, null, { deposit_method: 'stripe', deposit_method_at: new Date().toISOString() })
+        await advanceSetup(biz, 'deposit_method'); return '__sent__'
+      } catch (e) { console.error('[Setup] stripe link failed:', e.message); await say(`I couldn't make your Stripe link just now. You can connect Stripe from your dashboard under Billing, or paste a payment link here instead.`); return '__sent__' }
+    }
+    if (url) {
+      const link = /^https?:\/\//i.test(url) ? url : 'https://' + url
+      await supabase.from('businesses').update({ payment_link: link }).eq('id', biz.id)
+      await say(`Saved. When a client books a service with a deposit, I'll send them ${link} and text you when they say they've paid, so you can reply "confirm <name>" to lock it in.`)
+      await setPending(biz, null, { deposit_method: 'link', deposit_method_at: new Date().toISOString() })
+      await advanceSetup(biz, 'deposit_method'); return '__sent__'
+    }
+    if (NO_RE.test(t)) { await say(`No problem. Deposits stay off until you connect Stripe or send me a payment link.`); await setPending(biz, null); await advanceSetup(biz, 'deposit_method'); return '__sent__' }
+    return null
+  }
+
+  if (pq.kind === 'hours') {
+    if (NO_RE.test(t)) { await say(`Okay, you can set hours any time in your dashboard or just text them to me.`); await setPending(biz, null); await advanceSetup(biz, 'hours'); return '__sent__' }
+    let week = null
+    try { week = await parseHours(t) } catch (e) { console.error('[Setup] hours parse failed:', e.message) }
+    if (!week) return null
+    await supabase.from('businesses').update({ hours: week }).eq('id', biz.id)
+    await say(`Hours set: ${describeHours(week)}. Closed the other days.`)
+    await setPending(biz, null, { hours_at: new Date().toISOString() })
+    await advanceSetup(biz, 'hours'); return '__sent__'
+  }
+
+  if (pq.kind === 'staff') {
+    if (/\b(just me|only me|solo|myself|me)\b/i.test(t) || NO_RE.test(t)) {
+      await say(`Got it, just you.`)
+      await setPending(biz, null, { staff_at: new Date().toISOString() })
+      await advanceSetup(biz, 'staff'); return '__sent__'
+    }
+    const names = t.replace(/\b(and|&)\b/gi, ',').split(/[,\n]/).map(x => x.trim().replace(/[.!]+$/, '')).filter(x => x && x.length <= 40 && /^[a-z' .-]+$/i.test(x))
+    if (!names.length) return null
+    const existing = Array.isArray(biz.staff_members) ? biz.staff_members.filter(st => st && st.name) : []
+    const have = new Set(existing.map(st => st.name.toLowerCase()))
+    const added = names.filter(n => !have.has(n.toLowerCase())).map(n => ({ name: n.replace(/\b\w/g, c => c.toUpperCase()), phone: '', email: '', auto_schedule: false, notify_via: 'email' }))
+    await supabase.from('businesses').update({ staff_members: [...existing, ...added] }).eq('id', biz.id)
+    await say(`Added ${added.map(a => a.name).join(', ')}. Clients can ask for them by name. Add their phone or email in your dashboard under Staff if you want them notified.`)
+    await setPending(biz, null, { staff_at: new Date().toISOString() })
+    await advanceSetup(biz, 'staff'); return '__sent__'
   }
   return null
 }
@@ -550,6 +735,6 @@ async function runTrialOnboardingDrip() {
 module.exports = {
   normalizeUSPhone, formatPhone,
   sendVerificationCode, verifyCode, isRecentlyVerified, phoneAlreadyUsedTrial,
-  lineTypeCheck, activateInstantTrial, sendTrialWelcome, ensureProfileSlug, profileUrl, runAutoImport, announceImport, handlePendingOwnerReply, setupOfferReply, recordSetupRequest, recordSetupSource, setupSourceAck, expiredOwnerReply,
+  lineTypeCheck, activateInstantTrial, sendTrialWelcome, ensureProfileSlug, profileUrl, runAutoImport, announceImport, handlePendingOwnerReply, advanceSetup, setupOfferReply, recordSetupRequest, recordSetupSource, setupSourceAck, expiredOwnerReply,
   runTrialOnboardingDrip, addCardLink, TRIAL_DAYS
 }

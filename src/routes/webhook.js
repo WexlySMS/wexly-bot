@@ -264,8 +264,9 @@ router.post('/sms', validateTwilio, async (req, res) => {
   }
 
   try {
-    // Look up which business owns this Twilio number
-    const business = await db.getBusinessBySmsNumber(toNumber)
+    // Look up which business owns this Twilio number (paused ones too: the
+    // owner must always be able to text it, and customers get silence below)
+    const business = await db.getBusinessBySmsNumber(toNumber, { includePaused: true })
 
     if (!business) {
       console.error(`[SMS] No business found for number ${toNumber}`)
@@ -441,7 +442,7 @@ router.post('/sms', validateTwilio, async (req, res) => {
       try {
         const { handlePendingOwnerReply } = require('../bot/trialOnboarding')
         const pendingReply = await handlePendingOwnerReply(business, incomingText)
-        if (pendingReply) { await sendSMS(toNumber, customerPhone, pendingReply); console.log(`[Owner] Pending question answered for ${business.business_name}`); return }
+        if (pendingReply) { if (pendingReply !== '__sent__') await sendSMS(toNumber, customerPhone, pendingReply); console.log(`[Owner] Pending question answered for ${business.business_name}`); return }
       } catch (e) { console.error('[Owner] pending reply check failed:', e.message) }
 
       let ownerReply
@@ -463,6 +464,27 @@ router.post('/sms', validateTwilio, async (req, res) => {
     if (business.demo_mode) {
       const { logDemoLead } = require('../bot/demoMode')
       await logDemoLead(business, customerPhone, incomingText)
+    }
+
+    // ── Manual deposit "PAID" (v204) ─────────────────────────────────────────
+    // The client paid at the owner's link and says so. Hold the slot, tell the
+    // owner, and let them confirm with "confirm <name>". Deterministic, no model.
+    if (/\b(paid|payed|sent (it|the deposit|the money)|just (sent|paid)|venmo'?d|zelle'?d|done)\b/i.test(incomingText) && incomingText.length < 80) {
+      try {
+        const sbDep = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+        const { data: dep } = await sbDep.from('appointments').select('id, customer_name, service_name, appointment_date, appointment_time, deposit_amount')
+          .eq('business_id', business.id).eq('customer_phone', customerPhone).eq('status', 'deposit_pending').eq('deposit_status', 'pending').eq('deposit_payment_mode', 'manual')
+          .order('created_at', { ascending: false }).limit(1).maybeSingle()
+        if (dep) {
+          await sbDep.from('appointments').update({ deposit_status: 'reported', deposit_expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() }).eq('id', dep.id)
+          const first = (dep.customer_name || 'The client').split(' ')[0]
+          const amt = dep.deposit_amount ? ` $${(dep.deposit_amount / 100).toFixed(0)}` : ''
+          await sendSMS(toNumber, customerPhone, `Thanks ${first}! I've let ${business.business_name} know. You'll get a confirmation text as soon as they see the${amt} deposit.`)
+          if (business.owner_phone) await sendSMS(toNumber, business.owner_phone, `${dep.customer_name || customerPhone} says they sent the${amt} deposit for ${dep.service_name || 'their appointment'} on ${dep.appointment_date}${dep.appointment_time ? ' at ' + String(dep.appointment_time).slice(0, 5) : ''}. Check your payments, then reply "confirm ${first}" to lock it in or "cancel ${first}" if it never came.`).catch(() => {})
+          console.log(`[Deposit] manual deposit reported by ${customerPhone} for appt ${dep.id}`)
+          return
+        }
+      } catch (e) { console.error('[Deposit] manual PAID check failed:', e.message) }
     }
 
     // ── SMS tip prompt reply (🔒 Entry 56) ──────────────────────────────────

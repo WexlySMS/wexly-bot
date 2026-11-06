@@ -3240,6 +3240,11 @@ app.get('/stripe-connect/callback', async (req, res) => {
     await supabase.from('businesses')
       .update({ stripe_account_id: accountId, stripe_account_connected: true })
       .eq('id', businessId)
+    // v204: the owner may have connected from a text link; close the loop by text.
+    try {
+      const { data: bz } = await supabase.from('businesses').select('owner_phone, sms_number').eq('id', businessId).maybeSingle()
+      if (bz?.owner_phone && bz?.sms_number) await require('./src/utils/sms').sendSMS(bz.sms_number, bz.owner_phone, `Stripe is connected. Deposits are now charged by card and bookings confirm on their own.`)
+    } catch (e) { console.error('[Stripe Connect] owner text failed:', e.message) }
 
     // Redirect back to dashboard billing section
     res.redirect(`${process.env.SITE_URL}/dashboard.html?stripe_connected=1`)
