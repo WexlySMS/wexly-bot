@@ -1072,7 +1072,17 @@ app.post('/admin/business/:id/import/apply', async (req, res) => {
   if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Nothing to apply' })
   try {
     const { applyImport } = require('./src/utils/siteImporter')
-    res.json({ success: true, result: await applyImport(id, data, options) })
+    const result = await applyImport(id, data, options)
+    // v204: same follow-up the SETUP text flow sends, so the owner hears what
+    // landed and gets asked whether it should all be instant book.
+    let notified = false
+    if (options.notify) {
+      try {
+        const { data: biz } = await adminSb().from('businesses').select('id, business_name, owner_phone, sms_number, onboarding, profile_slug').eq('id', id).maybeSingle()
+        if (biz) notified = !!(await require('./src/bot/trialOnboarding').announceImport(biz, result))
+      } catch (e) { console.error('[Admin] import notify failed:', e.message) }
+    }
+    res.json({ success: true, result, notified })
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
@@ -2522,6 +2532,109 @@ app.get('/public/profile/:slug', async (req, res) => {
   }
 })
 
+// ── Booking page with per-business link previews (v204) ──────────────────────
+// getwexly.com/book/* is proxied here by Netlify (_redirects). We serve the
+// static book.html but stamp the business's own <title>, description and
+// og:image into the head so iMessage, Instagram, Facebook and Slack previews
+// show the salon instead of a generic Wexly card. Crawlers never run JS, so
+// this has to happen server side. The page itself is unchanged: it still
+// reads the slug from the URL and loads everything from /public/profile-v2.
+const BOOK_PAGE_URL = process.env.BOOK_PAGE_URL || 'https://getwexly.com/book.html'
+const BOOK_PAGE_TTL_MS = 5 * 60 * 1000
+const DEFAULT_OG_IMAGE = 'https://getwexly.com/og-image.png'
+let bookPageCache = { html: '', at: 0 }
+
+async function getBookPageHtml() {
+  const fresh = bookPageCache.html && (Date.now() - bookPageCache.at) < BOOK_PAGE_TTL_MS
+  if (fresh) return bookPageCache.html
+  try {
+    const r = await fetch(BOOK_PAGE_URL, { headers: { 'User-Agent': 'WexlyBot/1.0 (+https://getwexly.com)' } })
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+    const html = await r.text()
+    if (!/<\/head>/i.test(html)) throw new Error('unexpected body')
+    bookPageCache = { html, at: Date.now() }
+    return html
+  } catch (err) {
+    console.error('[Book Page] fetch failed:', err.message)
+    if (bookPageCache.html) return bookPageCache.html // serve stale rather than fail
+    throw err
+  }
+}
+
+const escHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+const prettyPhone = (p) => { const d = String(p || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : (p || '') }
+const httpsUrl = (u) => (typeof u === 'string' && /^https:\/\/\S+$/i.test(u.trim())) ? u.trim() : null
+
+function buildBookMeta(biz, slug) {
+  const pageUrl = `https://getwexly.com/book/${slug}`
+  if (!biz) {
+    return { title: 'Book an appointment', description: 'Services, hours and booking by text.', image: DEFAULT_OG_IMAGE, card: 'summary_large_image', url: pageUrl, isDefault: true }
+  }
+  const typeLabels = { dental: 'Dental Office', restaurant: 'Restaurant', salon: 'Hair Salon', medical: 'Medical Practice', spa: 'Day Spa & Massage', gym: 'Fitness Studio', barbershop: 'Barbershop', nails: 'Nail Salon', autorepair: 'Auto Repair' }
+  const type = biz.business_type === 'other' ? (biz.business_type_custom || '') : (typeLabels[biz.business_type] || biz.business_type || '')
+  // City from a free-form address: "123 Main St, Los Angeles, CA 90001" → "Los Angeles"
+  const parts = String(biz.address || '').split(',').map(s => s.trim()).filter(Boolean)
+  const city = parts.length >= 2 ? parts[parts.length - 2].replace(/\s+\d.*$/, '') : ''
+  const where = [type, city].filter(Boolean).join(' in ')
+  const phone = prettyPhone(biz.sms_number)
+  const tagline = String(biz.profile_description || '').trim().replace(/[.\s]+$/, '')
+  const bits = []
+  bits.push(tagline || 'Services, hours and open times')
+  if (phone) bits.push(`Text ${phone} to book`)
+  const description = (bits.join('. ') + '.').slice(0, 200)
+
+  // Best picture for the preview: cover photo → first portfolio photo → logo → Wexly default
+  const photos = Array.isArray(biz.profile_photos) ? biz.profile_photos : []
+  const firstPhoto = httpsUrl(typeof photos[0] === 'string' ? photos[0] : photos[0]?.url)
+  const cover = httpsUrl(biz.profile_cover_url)
+  const logo = httpsUrl(biz.logo_url)
+  const image = cover || firstPhoto || logo || DEFAULT_OG_IMAGE
+  // A logo is usually square, so ask for the small card instead of a cropped banner
+  const card = (image === logo && !cover && !firstPhoto) ? 'summary' : 'summary_large_image'
+  const title = where ? `${biz.business_name} · ${where}` : biz.business_name
+  return { title, description, image, card, url: pageUrl, isDefault: false }
+}
+
+function stampBookMeta(html, m) {
+  const tags = [
+    `<meta name="description" content="${escHtml(m.description)}">`,
+    `<link rel="canonical" href="${escHtml(m.url)}">`,
+    `<meta property="og:type" content="website">`,
+    `<meta property="og:url" content="${escHtml(m.url)}">`,
+    `<meta property="og:title" content="${escHtml(m.title)}">`,
+    `<meta property="og:description" content="${escHtml(m.description)}">`,
+    `<meta property="og:image" content="${escHtml(m.image)}">`,
+    m.isDefault ? `<meta property="og:image:width" content="1200">\n<meta property="og:image:height" content="630">` : '',
+    `<meta name="twitter:card" content="${m.card}">`,
+    `<meta name="twitter:title" content="${escHtml(m.title)}">`,
+    `<meta name="twitter:description" content="${escHtml(m.description)}">`,
+    `<meta name="twitter:image" content="${escHtml(m.image)}">`,
+  ].filter(Boolean).join('\n')
+  return html
+    .replace(/<title>[\s\S]*?<\/title>/i, `<title>${escHtml(m.title)}</title>`)
+    .replace(/<meta\s+name="description"[^>]*>\s*/i, '')
+    .replace(/<\/head>/i, tags + '\n</head>')
+}
+
+app.get(['/book', '/book/:slug'], async (req, res) => {
+  const slug = String(req.params.slug || '').toLowerCase().replace(/[^a-z0-9-]/g, '')
+  let html
+  try { html = await getBookPageHtml() } catch {
+    return res.status(503).type('html').send('<!doctype html><meta charset="utf-8"><title>Wexly</title><p style="font:16px system-ui;padding:40px;text-align:center">The booking page is taking a moment to load. Please try again.</p>')
+  }
+  let biz = null
+  if (slug.length >= 2) {
+    try {
+      const base = 'business_name, business_type, business_type_custom, logo_url, sms_number, address, profile_description, profile_photos'
+      let q = await supabase.from('businesses').select(base + ', profile_cover_url').eq('profile_slug', slug).eq('profile_enabled', true).maybeSingle()
+      if (q.error && /column|42703/i.test(q.error.message + q.error.code)) q = await supabase.from('businesses').select(base).eq('profile_slug', slug).eq('profile_enabled', true).maybeSingle()
+      biz = q.data || null
+    } catch (err) { console.error('[Book Page] lookup failed:', err.message) }
+  }
+  res.set('Cache-Control', biz ? 'public, max-age=60, s-maxage=300' : 'no-store')
+  res.status(biz ? 200 : 404).type('html').send(stampBookMeta(html, buildBookMeta(biz, slug)))
+})
+
 // Optimized version — single query for business ID
 app.get('/public/profile-v2/:slug', async (req, res) => {
   try {
@@ -3646,7 +3759,7 @@ app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════╗
   ║   Wexly SMS Bot v2.0                 ║
-  ║   BUILD: v203 (import, db proxy)     ║
+  ║   BUILD: v204 (og tags, import ask)  ║
   ║   Running on port ${PORT}               ║
   ║                                      ║
   ║   SMS:    POST /webhook/sms          ║

@@ -1175,6 +1175,15 @@ function getOwnerSession(businessId) {
   return session
 }
 
+// v204: when the bot texts the owner on its own (import summary, a question),
+// record it here so a follow-up like "yes" or "make Balayage $240" lands with
+// the model knowing what was just said. Stored as a bracketed user-role note:
+// always valid in the API regardless of what the history ends on.
+function noteOwnerOutbound(businessId, text) {
+  const session = getOwnerSession(businessId)
+  session.messages.push({ role: 'user', content: `[Context: Wexly just texted the owner this message, so their next reply is probably about it: "${String(text).slice(0, 600)}"]` })
+}
+
 // Trim history WITHOUT breaking tool_use/tool_result pairing. Naive slice(-10)
 // can cut a tool_use away from its tool_result (or start the window on a
 // tool_result), which the API rejects with a 400. This trims to ~10 messages but
@@ -1343,4 +1352,4 @@ function getOwnerWelcome(business) {
 Just text me what you need!`
 }
 
-module.exports = { handleOwnerMessage, getOwnerWelcome }
+module.exports = { handleOwnerMessage, getOwnerWelcome, noteOwnerOutbound }

@@ -308,18 +308,75 @@ async function runAutoImport(biz, url) {
     return null
   }
   const result = await applyImport(biz.id, data)
-  const { data: fresh } = await supabase.from('businesses').select('profile_slug').eq('id', biz.id).maybeSingle()
-  const names = [...result.services.added, ...result.services.updated]
-  const list = names.slice(0, 3).join(', ') + (names.length > 3 ? ` and ${names.length - 3} more` : '')
-  const bits = [`${names.length} service${names.length === 1 ? '' : 's'} (${list})`]
-  if (result.hours) bits.push('your hours')
-  if (result.photos) bits.push(`${result.photos} photos`)
-  const page = fresh?.profile_slug ? `${SITE_URL}/book/${fresh.profile_slug}` : null
-  const msg = `Done. I loaded ${bits.join(', ')} from your page.` + (page ? ` Your new booking page is live: ${page}` : '') +
-    ` Reply YES if it all looks right, or tell me what to change (for example "make Balayage $240" or "we close at 6 on Fridays").`
-  await sendSMS(biz.sms_number, biz.owner_phone, msg)
-  await markStep(biz.id, biz.onboarding, 'auto_import_at', { auto_import: { url, services: names.length, hours: result.hours, photos: result.photos } })
+  await announceImport(biz, result, { url })
   return result
+}
+
+// v204: tell the owner what was loaded and ask the one question that matters
+// next: should clients be able to book all of it instantly, or does every
+// request need the owner's OK first? The question is remembered in
+// onboarding.pending_question so a bare "yes"/"no" reply is understood even
+// after a restart, and the text is noted in the owner's chat history so any
+// other reply ("make Balayage $240") still has context. Used by the SETUP text
+// flow and by the admin drawer's Apply.
+async function announceImport(biz, result, { url = null } = {}) {
+  if (!biz.owner_phone || !biz.sms_number) return null
+  const { data: fresh } = await supabase.from('businesses').select('profile_slug, onboarding').eq('id', biz.id).maybeSingle()
+  const names = [...(result.services?.added || []), ...(result.services?.updated || [])]
+  const list = names.slice(0, 3).join(', ') + (names.length > 3 ? ` and ${names.length - 3} more` : '')
+  const bits = []
+  if (names.length) bits.push(`${names.length} service${names.length === 1 ? '' : 's'} (${list})`)
+  if (result.hours) bits.push('your hours')
+  if (result.photos) bits.push(`${result.photos} photo${result.photos === 1 ? '' : 's'}`)
+  if (!bits.length) return null
+  const page = fresh?.profile_slug ? `${SITE_URL}/book/${fresh.profile_slug}` : null
+  const msg = `Done. I loaded ${bits.join(', ')} from your page.` + (page ? ` Your booking page is live: ${page}` : '') +
+    (names.length
+      ? ` Quick question: should clients be able to book all of these instantly? Reply YES, or NO if you want to approve each request first. Anything to change, like "make Balayage $240", just tell me.`
+      : ` Anything to change, just tell me.`)
+  await sendSMS(biz.sms_number, biz.owner_phone, msg)
+  try { require('./ownerCommands').noteOwnerOutbound(biz.id, msg) } catch (e) { console.error('[Setup] owner note failed:', e.message) }
+  const extra = { auto_import: { url, services: names.length, hours: result.hours, photos: result.photos } }
+  if (names.length) extra.pending_question = { kind: 'import_mode', at: new Date().toISOString(), services: names.length }
+  await markStep(biz.id, fresh?.onboarding || biz.onboarding, 'auto_import_at', extra)
+  return msg
+}
+
+const PENDING_QUESTION_TTL_MS = 48 * 60 * 60 * 1000
+const YES_RE = /^\s*(y|yes|yeah|yep|yup|ya|sure|ok|okay|correct|instant|instantly|all|do it|sounds good|looks good|perfect|yes please|yes all)\s*[.!]*\s*$/i
+const NO_RE  = /^\s*(n|no|nope|nah|approve|approval|approve first|request|requests|not yet|no thanks)\s*[.!]*\s*$/i
+
+// Returns a reply string when the owner's text answers a question the bot is
+// waiting on; null means "not for me", and the normal owner handler runs.
+// Only short, bare replies are claimed, so "yes but make Balayage $240" still
+// reaches the model (with the question in its context) and the question stays open.
+async function handlePendingOwnerReply(biz, text) {
+  const ob = biz.onboarding || {}
+  const pq = ob.pending_question
+  if (!pq || !pq.kind) return null
+  const clear = async (extra = {}) => {
+    const { data } = await supabase.from('businesses').select('onboarding').eq('id', biz.id).maybeSingle()
+    const next = { ...(data?.onboarding || ob), ...extra }
+    delete next.pending_question
+    await supabase.from('businesses').update({ onboarding: next }).eq('id', biz.id)
+  }
+  if (pq.at && Date.now() - new Date(pq.at).getTime() > PENDING_QUESTION_TTL_MS) { await clear(); return null }
+
+  if (pq.kind === 'import_mode') {
+    const yes = YES_RE.test(text), no = NO_RE.test(text)
+    if (!yes && !no) return null
+    const mode = yes ? 'instant' : 'request'
+    const { data: rows, error } = await supabase.from('services').update({ booking_mode: mode }).eq('business_id', biz.id).select('id')
+    if (error) { console.error('[Setup] booking_mode update failed:', error.message); return null }
+    await clear({ import_mode_at: new Date().toISOString(), import_mode: mode })
+    const n = rows?.length || pq.services || 0
+    const reply = yes
+      ? `Done. All ${n} services are instant book: a client texts, picks a time, and it goes straight on your calendar. If any should need your OK first, just tell me which.`
+      : `Done. Every booking request will come to you first, and nothing is confirmed until you approve it. If you want some services to book instantly later, just tell me which.`
+    try { require('./ownerCommands').noteOwnerOutbound(biz.id, reply) } catch {}
+    return reply
+  }
+  return null
 }
 
 function setupSourceAck(biz) {
@@ -493,6 +550,6 @@ async function runTrialOnboardingDrip() {
 module.exports = {
   normalizeUSPhone, formatPhone,
   sendVerificationCode, verifyCode, isRecentlyVerified, phoneAlreadyUsedTrial,
-  lineTypeCheck, activateInstantTrial, sendTrialWelcome, ensureProfileSlug, profileUrl, runAutoImport, setupOfferReply, recordSetupRequest, recordSetupSource, setupSourceAck, expiredOwnerReply,
+  lineTypeCheck, activateInstantTrial, sendTrialWelcome, ensureProfileSlug, profileUrl, runAutoImport, announceImport, handlePendingOwnerReply, setupOfferReply, recordSetupRequest, recordSetupSource, setupSourceAck, expiredOwnerReply,
   runTrialOnboardingDrip, addCardLink, TRIAL_DAYS
 }

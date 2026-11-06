@@ -414,17 +414,35 @@ router.post('/sms', validateTwilio, async (req, res) => {
       {
         const ob = business.onboarding || {}
         const looksLikeSource = /https?:\/\/|\.(com|net|co|io|app|biz|salon|beauty)\b/i.test(incomingText) || (mediaUrls && mediaUrls.length)
-        if (ob.setup_requested_at && !ob.setup_source_at && looksLikeSource) {
+        const urlMatch = (incomingText.match(/https?:\/\/\S+|\b[a-z0-9.-]+\.(?:com|net|co|io|app|biz|salon|beauty)\b\S*/i) || [])[0]
+        // v204: a link on its own ("here's my page: glossgenius.com/emily") is an
+        // import request whether or not they typed SETUP first. The welcome text
+        // invites exactly that, so it can't land on the model as a shrug.
+        const bareLink = !!urlMatch && !/getwexly\.com/i.test(urlMatch) && incomingText.replace(urlMatch, '').replace(/[^a-z0-9]/gi, '').length <= 30
+        const inSetupFlow = ob.setup_requested_at && !ob.setup_source_at && looksLikeSource
+        if (inSetupFlow || bareLink) {
           const { recordSetupSource, setupSourceAck, runAutoImport } = require('../bot/trialOnboarding')
           const { normalizeUrl } = require('../utils/siteImporter')
-          const srcUrl = normalizeUrl((incomingText.match(/https?:\/\/\S+|\b[a-z0-9.-]+\.(?:com|net|co|io|app|biz|salon|beauty)\b\S*/i) || [])[0])
+          const srcUrl = normalizeUrl(urlMatch)
+          const fallback = inSetupFlow
+            ? () => sendSMS(toNumber, customerPhone, setupSourceAck(business))
+            : () => sendSMS(toNumber, customerPhone, `I could not read services from that page. Reply SETUP and we will set it up for you, or text me your services and prices and I will add them.`)
           await sendSMS(toNumber, customerPhone, srcUrl ? `Got it, reading your page now. Give me a minute.` : setupSourceAck(business))
-          recordSetupSource(business, incomingText, mediaUrls).catch(e => console.error('[Owner] setup source record failed:', e.message))
-          // v203: a link gets imported on the spot; if nothing usable comes back, fall back to the human ack.
-          if (srcUrl) runAutoImport(business, srcUrl).then(r => { if (!r) return sendSMS(toNumber, customerPhone, setupSourceAck(business)) }).catch(e => { console.error('[Owner] auto-import failed:', e.message); sendSMS(toNumber, customerPhone, setupSourceAck(business)).catch(() => {}) })
+          if (inSetupFlow) recordSetupSource(business, incomingText, mediaUrls).catch(e => console.error('[Owner] setup source record failed:', e.message))
+          // v203: a link gets imported on the spot; if nothing usable comes back, fall back.
+          if (srcUrl) runAutoImport(business, srcUrl).then(r => { if (!r) return fallback() }).catch(e => { console.error('[Owner] auto-import failed:', e.message); fallback().catch(() => {}) })
           return
         }
       }
+
+      // v204: is the bot waiting on an answer from this owner (e.g. "book all
+      // imported services instantly?")? A bare yes/no resolves it here instead
+      // of reaching the model with no idea what was being agreed to.
+      try {
+        const { handlePendingOwnerReply } = require('../bot/trialOnboarding')
+        const pendingReply = await handlePendingOwnerReply(business, incomingText)
+        if (pendingReply) { await sendSMS(toNumber, customerPhone, pendingReply); console.log(`[Owner] Pending question answered for ${business.business_name}`); return }
+      } catch (e) { console.error('[Owner] pending reply check failed:', e.message) }
 
       let ownerReply
       if (isFirstContact) {

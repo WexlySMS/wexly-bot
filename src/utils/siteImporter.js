@@ -457,7 +457,7 @@ async function applyImport(businessId, data, options = {}) {
     for (const s of data.services.slice(0, 80)) {
       if (allow && !allow.has(s.name.toLowerCase())) continue
       const priceNum = parseFloat(String(s.price || '').replace('+', ''))
-      const row = { name: s.name, duration_mins: s.duration_mins || 60, description: s.description, category: s.category, booking_mode: s.by_request ? 'approval' : 'instant' }
+      const row = { name: s.name, duration_mins: s.duration_mins || 60, description: s.description, category: s.category, booking_mode: s.by_request ? 'request' : 'instant' } // v204: 'request' is the mode the engine routes to owner approval
       if (s.price) { row.price = s.price; if (Number.isFinite(priceNum)) row.price_cents = Math.round(priceNum * 100) }
       if (s.deposit) row.deposit_amount = s.deposit
       const hit = byName[s.name.toLowerCase()]
