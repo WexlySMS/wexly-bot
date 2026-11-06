@@ -2570,27 +2570,49 @@ app.get('/public/profile/:slug', async (req, res) => {
 // show the salon instead of a generic Wexly card. Crawlers never run JS, so
 // this has to happen server side. The page itself is unchanged: it still
 // reads the slug from the URL and loads everything from /public/profile-v2.
-const BOOK_PAGE_URL = process.env.BOOK_PAGE_URL || 'https://getwexly.com/book.html'
+const BOOK_PAGE_URLS = [process.env.BOOK_PAGE_URL || 'https://getwexly.com/book.html', 'https://dainty-mochi-70c891.netlify.app/book.html']
 const BOOK_PAGE_TTL_MS = 5 * 60 * 1000
 const DEFAULT_OG_IMAGE = 'https://getwexly.com/og-image.png'
 let bookPageCache = { html: '', at: 0 }
+let bookPageRefreshing = null
 
-async function getBookPageHtml() {
-  const fresh = bookPageCache.html && (Date.now() - bookPageCache.at) < BOOK_PAGE_TTL_MS
-  if (fresh) return bookPageCache.html
-  try {
-    const r = await fetch(BOOK_PAGE_URL, { headers: { 'User-Agent': 'WexlyBot/1.0 (+https://getwexly.com)' } })
-    if (!r.ok) throw new Error('HTTP ' + r.status)
-    const html = await r.text()
-    if (!/<\/head>/i.test(html)) throw new Error('unexpected body')
-    bookPageCache = { html, at: Date.now() }
-    return html
-  } catch (err) {
-    console.error('[Book Page] fetch failed:', err.message)
-    if (bookPageCache.html) return bookPageCache.html // serve stale rather than fail
-    throw err
+// Render's outbound IPv6 is unreliable and Node's fetch tries it first, which
+// showed up as a 10s "fetch failed" on every cold cache (v204 incident). IPv4
+// first for everything, plus a short per-attempt timeout and a mirror host.
+try { require('dns').setDefaultResultOrder('ipv4first') } catch {}
+
+async function fetchBookPage() {
+  for (const url of BOOK_PAGE_URLS) {
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 6000)
+    try {
+      const r = await fetch(url, { signal: ctl.signal, headers: { 'User-Agent': 'WexlyBot/1.0 (+https://getwexly.com)' } })
+      if (!r.ok) throw new Error('HTTP ' + r.status)
+      const html = await r.text()
+      if (!/<\/head>/i.test(html)) throw new Error('unexpected body')
+      bookPageCache = { html, at: Date.now() }
+      return html
+    } catch (err) { console.error('[Book Page] fetch failed (' + url + '):', err.cause?.code || err.message) }
+    finally { clearTimeout(t) }
   }
+  throw new Error('book.html unreachable')
 }
+// Stale-while-revalidate: a request never waits on Netlify when any copy exists.
+function refreshBookPage() {
+  if (!bookPageRefreshing) bookPageRefreshing = fetchBookPage().catch(() => null).finally(() => { bookPageRefreshing = null })
+  return bookPageRefreshing
+}
+async function getBookPageHtml() {
+  if (bookPageCache.html) {
+    if (Date.now() - bookPageCache.at > BOOK_PAGE_TTL_MS) refreshBookPage()
+    return bookPageCache.html
+  }
+  await refreshBookPage()
+  if (!bookPageCache.html) throw new Error('book.html unreachable')
+  return bookPageCache.html
+}
+// Warm on boot and keep warm, so the first visitor after a deploy is not the one who pays.
+setTimeout(refreshBookPage, 3000)
+setInterval(refreshBookPage, BOOK_PAGE_TTL_MS)
 
 const escHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 const prettyPhone = (p) => { const d = String(p || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : (p || '') }
@@ -2651,7 +2673,7 @@ app.get(['/book', '/book/:slug'], async (req, res) => {
   const slug = String(req.params.slug || '').toLowerCase().replace(/[^a-z0-9-]/g, '')
   let html
   try { html = await getBookPageHtml() } catch {
-    return res.status(503).type('html').send('<!doctype html><meta charset="utf-8"><title>Wexly</title><p style="font:16px system-ui;padding:40px;text-align:center">The booking page is taking a moment to load. Please try again.</p>')
+    return res.redirect(302, 'https://getwexly.com/book.html' + (slug ? '?s=' + encodeURIComponent(slug) : ''))
   }
   let biz = null
   if (slug.length >= 2) {
