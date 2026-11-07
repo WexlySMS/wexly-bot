@@ -285,6 +285,35 @@ const OWNER_TOOLS = [
     }
   },
   {
+    name: 'import_appointments',
+    description: 'Bring the owner\'s existing appointments into Wexly from their previous booking app. Use when the owner says "import my appointments", "bring over my bookings", "here\'s my schedule" with photos attached, "sync my calendar", "read my calendar", or sends calendar screenshots. source=photos reads the screenshots they just texted; source=link needs a calendar URL (Google "secret address in iCal format", Apple public calendar, any .ics); source=how explains how to get the link for their platform.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        source: { type: 'string', enum: ['photos', 'link', 'how'] },
+        url: { type: 'string', description: 'The calendar link when source=link' }
+      },
+      required: ['source']
+    }
+  },
+  {
+    name: 'calendar_sync',
+    description: 'Control the ongoing mirror of the owner\'s old calendar. action=status ("is my calendar still syncing?"), action=stop ("stop syncing my calendar", "I\'m off GlossGenius now"), action=resume ("keep syncing", "sync my calendar again" when a link was given before).',
+    input_schema: { type: 'object', properties: { action: { type: 'string', enum: ['status', 'stop', 'resume'] } }, required: ['action'] }
+  },
+  {
+    name: 'attach_client_phone',
+    description: 'Add a phone number to an imported client who has none yet, so they get reminders. Use when the owner says "Jess is 310-555-1234", "add Marco\'s number 424-555-9999", or asks "who is missing a number" (then pass list=true).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clients: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, phone: { type: 'string' } }, required: ['name', 'phone'] } },
+        list: { type: 'boolean', description: 'true to list clients still missing a number' }
+      },
+      required: []
+    }
+  },
+  {
     name: 'update_inventory',
     description: 'Update the stock quantity of a product. Use when owner says things like "added 10 Olaplex", "restocked shampoo 24 units", "we got 6 more nail polish in", "update inventory: Olaplex 15".',
     input_schema: {
@@ -1086,6 +1115,53 @@ async function executeOwnerTool(toolName, input, business) {
       return `Payment link removed.` + (business.stripe_account_connected ? ` Deposits still run through Stripe.` : ` Deposits are off until you connect Stripe or give me a new link.`)
     }
 
+    case 'import_appointments': {
+      const Cal = require('../utils/calendarImporter')
+      const { handleCalendarInput } = require('./trialOnboarding')
+      if (input.source === 'how') {
+        const platform = Cal.platformFromUrl(business.onboarding?.auto_import?.url || business.onboarding?.setup_source?.url || '')
+        return [].concat(Cal.bookingsQuestion(platform)).join(' ')
+      }
+      if (input.source === 'link') {
+        const url = Cal.extractCalendarUrl(input.url || '') || (input.url && Cal.normalizeCalendarUrl(input.url) ? input.url : null)
+        if (!url) return `I need the calendar link itself. In Google Calendar it's Settings > your calendar > Integrate calendar > "Secret address in iCal format". Or text me screenshots of your calendar.`
+        await handleCalendarInput(business, { url })
+        return `__handled__`
+      }
+      const media = getOwnerSession(business.id).lastMedia || []
+      if (!media.length) return `Text me screenshots of your calendar (one per week is perfect) or your calendar link and I'll bring the appointments over.`
+      await handleCalendarInput(business, { mediaUrls: media, text: getOwnerSession(business.id).lastText || '' })
+      getOwnerSession(business.id).lastMedia = []
+      return `__handled__`
+    }
+
+    case 'calendar_sync': {
+      const Cal = require('../utils/calendarImporter')
+      const feed = business.onboarding?.calendar_feed
+      if (!feed?.url) return `No calendar is linked yet. Text me your calendar link (Google Calendar > Settings > your calendar > "Secret address in iCal format") and I'll bring your appointments over and keep them in sync.`
+      if (input.action === 'stop') { await Cal.setFeedActive(business.id, false); return `Done, I've stopped mirroring your old calendar. Everything already in Wexly stays.` }
+      if (input.action === 'resume') { await Cal.setFeedActive(business.id, true); return `Back on. I'll watch your old calendar for another ${Cal.SYNC_DAYS} days.` }
+      const last = feed.last_sync_at ? new Date(feed.last_sync_at).toLocaleString('en-US', { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'never'
+      return feed.active ? `Yes, syncing. Last checked ${last}, ${feed.events_seen || 0} events on that calendar. It stops on ${new Date(feed.until).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: tz })} unless you say "keep syncing".` : `Not syncing (${feed.ended === 'owner' ? 'you turned it off' : feed.ended === 'errors' ? 'the link stopped working' : 'the window ended'}). Say "sync my calendar again" to resume, or text me a new link.`
+    }
+
+    case 'attach_client_phone': {
+      const Cal = require('../utils/calendarImporter')
+      if (input.list || !Array.isArray(input.clients) || !input.clients.length) {
+        const left = await Cal.listNoPhone(business.id)
+        return left.length ? `Clients with upcoming appointments and no phone number: ${left.join(', ')}. Text me like "Jess 310-555-1234" to add one.` : `Every upcoming appointment has a phone number.`
+      }
+      const done = [], missed = []
+      for (const c of input.clients) {
+        let d = String(c.phone || '').replace(/\D/g, ''); if (d.length === 11 && d.startsWith('1')) d = d.slice(1)
+        if (d.length !== 10) { missed.push(`${c.name} (bad number)`); continue }
+        const r = await Cal.attachClientPhone(business.id, c.name, '+1' + d)
+        ;(r.ok ? done : missed).push(r.name || c.name)
+      }
+      const left = await Cal.listNoPhone(business.id)
+      return `${done.length ? `Attached: ${done.join(', ')}.` : ''}${missed.length ? ` Couldn't match: ${missed.join(', ')}.` : ''}${left.length ? ` Still missing: ${left.slice(0, 8).join(', ')}.` : ' Everyone has a number now.'}`.trim()
+    }
+
     case 'update_inventory': {
       const nameSearch = input.product_name?.toLowerCase()
       const { data: products } = await supabase
@@ -1318,15 +1394,20 @@ function trimSessionSafely(session, max = 10) {
 }
 
 // ── Main owner message handler ──────────────────────────────────────────────
-async function handleOwnerMessage(business, incomingText) {
-  console.log(`[Owner] Command from owner of ${business.business_name}: "${incomingText}"`)
+async function handleOwnerMessage(business, incomingText, mediaUrls = []) {
+  console.log(`[Owner] Command from owner of ${business.business_name}: "${incomingText}"${mediaUrls?.length ? ` (+${mediaUrls.length} photo(s))` : ''}`)
 
   const tz = business.timezone || 'America/New_York'
   const today = new Date().toLocaleDateString('en-CA', { timeZone: tz })
   const todayFull = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: tz })
 
   const session = getOwnerSession(business.id)
-  session.messages.push({ role: 'user', content: incomingText })
+  // v206: photos aren't shown to this model; it just needs to know they're
+  // there so it can call import_appointments(source=photos). The URLs are kept
+  // on the session for that tool.
+  if (Array.isArray(mediaUrls) && mediaUrls.length) { session.lastMedia = mediaUrls.slice(0, 8); session.lastText = incomingText }
+  const userText = (incomingText || '') + (mediaUrls?.length ? `\n[The owner attached ${mediaUrls.length} photo${mediaUrls.length === 1 ? '' : 's'} to this text. If they look like calendar screenshots or they mention appointments/schedule, call import_appointments with source=photos.]` : '')
+  session.messages.push({ role: 'user', content: userText || '[empty text]' })
 
   // Trim old context safely (never split a tool_use/tool_result pair)
   trimSessionSafely(session)
@@ -1356,6 +1437,7 @@ You can help them:
 - Send quotes
 - Add services with duration and price — "Haircut 45 min $60, Color 2 hr $150"
 - Set, list and cancel reminders — "Remind me tomorrow at 9 to call the supplier" (business timezone: ${tz})
+- Bring over appointments from their old booking app — calendar link or screenshots (import_appointments), keep that calendar syncing or stop it (calendar_sync), add a phone number to an imported client (attach_client_phone)
 
 RULES:
 - Be concise — this is SMS.
@@ -1391,9 +1473,16 @@ RULES:
         })
       }
 
+      // v206: a tool that already texted the owner itself (calendar import ack +
+      // summary) returns '__handled__'. Record it in the history and send
+      // nothing more, so the owner doesn't get a second, model-written reply.
+      const handled = toolResults.some(r => r.content === '__handled__')
+      if (handled) for (const r of toolResults) if (r.content === '__handled__') r.content = 'Done. The owner has been texted directly about this; no further reply needed.'
+
       // Push the assistant's tool_use turn, then ALL results in one user turn.
       session.messages.push({ role: 'assistant', content: response.content })
       session.messages.push({ role: 'user', content: toolResults })
+      if (handled) { session.messages.push({ role: 'assistant', content: '(handled by the calendar import)' }); trimSessionSafely(session); return null }
 
       // A fallback reply from the first tool result, in case the follow-up fails.
       const firstResult = toolResults[0].content
@@ -1459,6 +1548,7 @@ function getOwnerWelcome(business) {
 • Deposit alerts — "Confirm Sarah" or "Cancel Sarah"
 • Approve/deny requests — "Approve John" or "Deny Lisa"
 • Add services — "Haircut 45 min $60, Color 2 hr $150"
+• Bring over your bookings — text me your calendar link or screenshots
 • Reminders — "Remind me tomorrow at 9 to order color"
 • See the client experience — "DEMO"
 • Pause/resume the bot

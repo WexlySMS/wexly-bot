@@ -352,12 +352,20 @@ const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 // needs, one text at a time, remembering where it is in onboarding.pending_question
 // so a restart or a day's gap changes nothing. Each step is skipped when the
 // account already has the answer (hours imported, Stripe connected, ...).
-// Order: import_mode → deposits → deposit_method → hours → staff → done.
-const SETUP_STEPS = ['import_mode', 'deposits', 'deposit_method', 'hours', 'staff']
+// Order: import_mode → deposits → deposit_method → hours → staff → bookings → done.
+// v206: `bookings` brings their upcoming appointments over (calendar link or
+// screenshots) so nothing double-books during the switch. See utils/calendarImporter.
+const SETUP_STEPS = ['import_mode', 'deposits', 'deposit_method', 'hours', 'staff', 'bookings']
 
 async function freshBiz(id) {
   const { data } = await supabase.from('businesses').select('id, business_name, owner_name, owner_phone, sms_number, plan, hours, staff_members, payment_link, stripe_account_connected, stripe_account_id, profile_slug, onboarding, timezone').eq('id', id).maybeSingle()
   return data
+}
+// Has anything been imported (link, screenshot, or the dashboard's .ics upload)?
+async function importedAppointmentCount(businessId) {
+  const { IMPORT_NOTE } = require('../utils/calendarImporter')
+  const { count } = await supabase.from('appointments').select('id', { count: 'exact', head: true }).eq('business_id', businessId).ilike('notes', `${IMPORT_NOTE}%`)
+  return count || 0
 }
 async function setPending(biz, kind, extra = {}) {
   const { data } = await supabase.from('businesses').select('onboarding').eq('id', biz.id).maybeSingle()
@@ -367,7 +375,8 @@ async function setPending(biz, kind, extra = {}) {
   await supabase.from('businesses').update({ onboarding: next }).eq('id', biz.id)
   return next
 }
-function stepNeeded(biz, services, step) {
+function stepNeeded(biz, services, step, ctx = {}) {
+  const ob = biz.onboarding || {}
   const anyDeposit = services.some(sv => sv.deposit_amount && String(sv.deposit_amount).trim() !== '' && String(sv.deposit_amount) !== '0')
   const hasHours = Array.isArray(biz.hours) && biz.hours.some(h => h && (h.open === true || (h.open && h.close)))
   const hasStaff = Array.isArray(biz.staff_members) && biz.staff_members.some(st => st && st.name)
@@ -376,15 +385,20 @@ function stepNeeded(biz, services, step) {
   if (step === 'deposit_method') return anyDeposit && !hasDepositMethod
   if (step === 'hours') return !hasHours
   if (step === 'staff') return !hasStaff
+  if (step === 'bookings') return !ob.bookings_at && !ob.calendar_feed && !(ctx.importedCount > 0)
   return false
 }
+// Returns a string, or an array of strings sent as consecutive texts.
 function questionFor(biz, step, services) {
-  const plan = String(biz.plan || '').toLowerCase()
   switch (step) {
     case 'deposits': return `Next: do any services need a deposit to book? Reply NO, or tell me which and how much, like "Balayage $50, Color $40" or "all $25".`
     case 'deposit_method': return `How should deposits be collected? Reply STRIPE and I'll text you a link to connect your Stripe (clients pay by card and bookings confirm themselves), or paste your payment link (Venmo, Zelle, Square, PayPal) and I'll send that to clients and tell you when they say they've paid so you can confirm.`
     case 'hours': return `What are your hours? Something like "Tue to Sat 9 to 6, closed Sun and Mon" is perfect.`
-    case 'staff': return `Last one: is it just you taking appointments? Reply JUST ME, or the names of everyone who does, like "Mia, Jordan".`
+    case 'staff': return `Almost done: is it just you taking appointments? Reply JUST ME, or the names of everyone who does, like "Mia, Jordan".`
+    case 'bookings': {
+      const { bookingsQuestion, platformFromUrl } = require('../utils/calendarImporter')
+      return bookingsQuestion(platformFromUrl(biz.onboarding?.auto_import?.url || biz.onboarding?.setup_source?.url || ''))
+    }
     default: return null
   }
 }
@@ -393,15 +407,18 @@ async function advanceSetup(biz, fromStep) {
   const b = await freshBiz(biz.id) || biz
   const { data: services } = await supabase.from('services').select('id, name, deposit_amount, booking_mode').eq('business_id', b.id).neq('active', false)
   const svcs = services || []
+  const ctx = { importedCount: await importedAppointmentCount(b.id).catch(() => 0) }
   let i = SETUP_STEPS.indexOf(fromStep) + 1
-  for (; i < SETUP_STEPS.length; i++) if (stepNeeded(b, svcs, SETUP_STEPS[i])) break
+  for (; i < SETUP_STEPS.length; i++) if (stepNeeded(b, svcs, SETUP_STEPS[i], ctx)) break
   if (i < SETUP_STEPS.length) {
     const step = SETUP_STEPS[i]
-    const q = questionFor(b, step, svcs)
+    const qs = [].concat(questionFor(b, step, svcs)).filter(Boolean)
     await setPending(b, step)
-    await sendSMS(b.sms_number, b.owner_phone, q)
-    try { require('./ownerCommands').noteOwnerOutbound(b.id, q) } catch {}
-    return q
+    for (const q of qs) {
+      await sendSMS(b.sms_number, b.owner_phone, q)
+      try { require('./ownerCommands').noteOwnerOutbound(b.id, q) } catch {}
+    }
+    return qs.join('\n')
   }
   // Done: everything a working account needs is in place.
   const page = b.profile_slug ? `${SITE_URL}/book/${b.profile_slug}` : null
@@ -410,6 +427,7 @@ async function advanceSetup(biz, fromStep) {
   if (deposits) bits.push(`${deposits} with a deposit`)
   if (Array.isArray(b.hours) && b.hours.some(h => h && h.open)) bits.push('hours')
   if (Array.isArray(b.staff_members) && b.staff_members.some(st => st?.name)) bits.push(`${b.staff_members.filter(st => st?.name).length} staff`)
+  if (ctx.importedCount) bits.push(`${ctx.importedCount} upcoming appointment${ctx.importedCount === 1 ? '' : 's'} brought over`)
   const msg = `You're all set: ${bits.join(', ')}.` + (page ? ` Your booking page: ${page}` : '') +
     ` Put ${prettyNumber(b.sms_number)} on your Instagram and Google listing so clients text it. Anything you want changed, just tell me here, any time.`
   await setPending(b, null, { setup_complete_at: new Date().toISOString() })
@@ -458,7 +476,31 @@ async function stripeConnectUrl(biz) {
 // waiting on; null means "not for me", and the normal owner handler runs.
 // Only short, bare replies are claimed for yes/no steps, so "yes but make
 // Balayage $240" still reaches the model (with the question in its context).
-async function handlePendingOwnerReply(biz, text) {
+// v206: the owner sent a calendar link or screenshots (during setup or any
+// time). Ack now, import in the background (the model pass can take a minute
+// and Twilio's webhook must answer fast), text the summary, and if this was
+// the setup's `bookings` step, move the checklist along. Returns '__sent__'.
+async function handleCalendarInput(biz, { url = null, mediaUrls = [], text = '' } = {}) {
+  const C = require('../utils/calendarImporter')
+  const note = (m) => { try { require('./ownerCommands').noteOwnerOutbound(biz.id, m) } catch {} }
+  const say = async (m) => { await sendSMS(biz.sms_number, biz.owner_phone, m); note(m) }
+  const n = (mediaUrls || []).length
+  await say(url ? `Got it, reading your calendar now. Give me a minute.` : `Got it, reading your screenshot${n === 1 ? '' : 's'} now. Give me a minute.`)
+  ;(async () => {
+    const r = url ? await C.importFromCalendarLink(biz.id, url) : await C.importFromScreenshots(biz.id, mediaUrls, text)
+    await say(r.message)
+    if (!r.ok) return   // question (if any) stays open so they can try again
+    const fresh = await freshBiz(biz.id)
+    const ob = fresh?.onboarding || {}
+    const wasBookingsStep = ob.pending_question?.kind === 'bookings'
+    if (wasBookingsStep || !ob.bookings_at) await setPending(fresh || biz, null, { bookings_at: new Date().toISOString() })
+    if (wasBookingsStep) await advanceSetup(fresh || biz, 'bookings')
+    if (r.result?.noPhone?.length) await setPending(fresh || biz, 'import_phones', { import_no_phone: r.result.noPhone.slice(0, 50) })
+  })().catch(e => { console.error('[CalImport] background import failed:', e.message); say(`Something went wrong reading that. Try again in a minute, or text me screenshots of your calendar instead.`).catch(() => {}) })
+  return '__sent__'
+}
+
+async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
   const ob = biz.onboarding || {}
   const pq = ob.pending_question
   if (!pq || !pq.kind) return null
@@ -466,6 +508,49 @@ async function handlePendingOwnerReply(biz, text) {
   const t = String(text || '').trim()
   const note = (m) => { try { require('./ownerCommands').noteOwnerOutbound(biz.id, m) } catch {} }
   const say = async (m) => { await sendSMS(biz.sms_number, biz.owner_phone, m); note(m) }
+  const media = Array.isArray(mediaUrls) ? mediaUrls : []
+
+  if (pq.kind === 'bookings') {
+    const C = require('../utils/calendarImporter')
+    const url = C.extractCalendarUrl(t)
+    if (url) return handleCalendarInput(biz, { url, text: t })
+    if (media.length) return handleCalendarInput(biz, { mediaUrls: media, text: t })
+    if (NO_RE.test(t) || /^\s*(skip|later|not now|no thanks|pass)\s*[.!]*\s*$/i.test(t)) {
+      await say(`No problem. Any time you want them in, text me your calendar link or screenshots of your calendar and I'll add them.`)
+      await setPending(biz, null, { bookings_at: new Date().toISOString() })
+      await advanceSetup(biz, 'bookings'); return '__sent__'
+    }
+    if (YES_RE.test(t)) { await say(`Great. Text me the calendar link, or screenshots of your calendar, whenever you're ready and I'll take it from there.`); return '__sent__' }
+    if (/\b(how|where|what link|which link|don'?t know|not sure|help)\b/i.test(t)) {
+      const qs = [].concat(questionFor(biz, 'bookings')); const how = qs[1] || qs[0]
+      await say(how); return '__sent__'
+    }
+    return null
+  }
+
+  if (pq.kind === 'import_phones') {
+    const C = require('../utils/calendarImporter')
+    // Screenshots or a link while this is open still mean "import more".
+    if (C.extractCalendarUrl(t)) return handleCalendarInput(biz, { url: C.extractCalendarUrl(t), text: t })
+    if (media.length) return handleCalendarInput(biz, { mediaUrls: media, text: t })
+    const pairs = C.parseNamePhonePairs(t)
+    if (!pairs.length) {
+      if (NO_RE.test(t) || /^\s*(skip|later|not now|done|that'?s it|all good|pass)\s*[.!]*\s*$/i.test(t)) {
+        await say(`Okay. You can add a number any time like "Jess 310-555-1234", or upload your client list in the app under Customers and I'll match them.`)
+        await setPending(biz, null); return '__sent__'
+      }
+      return null
+    }
+    const done = [], missed = []
+    for (const p of pairs) { const r = await C.attachClientPhone(biz.id, p.name, p.phone); (r.ok ? done : missed).push(r.name || p.name) }
+    const left = await C.listNoPhone(biz.id)
+    let msg = done.length ? `Attached: ${done.join(', ')}.` : ''
+    if (missed.length) msg += ` I couldn't find an appointment for ${missed.join(', ')} that needs a number.`
+    msg += left.length ? ` Still missing a number: ${left.slice(0, 6).join(', ')}${left.length > 6 ? ` and ${left.length - 6} more` : ''}.` : ` Everyone has a number now.`
+    await say(msg.trim())
+    if (left.length) await setPending(biz, 'import_phones', { import_no_phone: left.slice(0, 50) }); else await setPending(biz, null)
+    return '__sent__'
+  }
 
   if (pq.kind === 'import_mode') {
     const yes = YES_RE.test(t), no = NO_RE.test(t)
@@ -735,6 +820,6 @@ async function runTrialOnboardingDrip() {
 module.exports = {
   normalizeUSPhone, formatPhone,
   sendVerificationCode, verifyCode, isRecentlyVerified, phoneAlreadyUsedTrial,
-  lineTypeCheck, activateInstantTrial, sendTrialWelcome, ensureProfileSlug, profileUrl, runAutoImport, announceImport, handlePendingOwnerReply, advanceSetup, setupOfferReply, recordSetupRequest, recordSetupSource, setupSourceAck, expiredOwnerReply,
+  lineTypeCheck, activateInstantTrial, sendTrialWelcome, ensureProfileSlug, profileUrl, runAutoImport, announceImport, handlePendingOwnerReply, handleCalendarInput, advanceSetup, setupOfferReply, recordSetupRequest, recordSetupSource, setupSourceAck, expiredOwnerReply,
   runTrialOnboardingDrip, addCardLink, TRIAL_DAYS
 }

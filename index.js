@@ -3836,7 +3836,7 @@ app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════╗
   ║   Wexly SMS Bot v2.0                 ║
-  ║   BUILD: v204 (og tags, import ask)  ║
+  ║   BUILD: v206 (bring over bookings)  ║
   ║   Running on port ${PORT}               ║
   ║                                      ║
   ║   SMS:    POST /webhook/sms          ║

@@ -186,6 +186,10 @@ function startScheduler() {
   // v205: text-first client reviews, ~2h after each appointment ends (src/bot/reviews.js)
   setInterval(() => require('./reviews').sendReviewRequests().catch(e => console.error('[Reviews]', e.message)), 60 * 60 * 1000)
   setTimeout(() => require('./reviews').sendReviewRequests().catch(e => console.error('[Reviews]', e.message)), 90 * 1000)
+  // v206: mirror linked old-platform calendars (new bookings, moves, cancellations)
+  // every 15 min for SYNC_DAYS after the owner texted the link (src/utils/calendarImporter.js)
+  setInterval(() => require('../utils/calendarImporter').syncCalendarFeeds().catch(e => console.error('[CalSync]', e.message)), 15 * 60 * 1000)
+  setTimeout(() => require('../utils/calendarImporter').syncCalendarFeeds().catch(e => console.error('[CalSync]', e.message)), 2 * 60 * 1000)
 
   // Daily digest — check every 10 minutes for accuracy
   setInterval(() => sendDailyDigests().catch(console.error), 10 * 60 * 1000)

@@ -412,6 +412,42 @@ router.post('/sms', validateTwilio, async (req, res) => {
         recordSetupRequest(business).catch(e => console.error('[Owner] setup request record failed:', e.message))
         return
       }
+      // v206: a calendar link (Google secret address, Apple public calendar,
+      // any .ics) is an appointments import, whatever else is going on. Checked
+      // before the booking-page import below so it never lands in the site
+      // importer as "could not read services from that page".
+      try {
+        const Cal = require('../utils/calendarImporter')
+        const calUrl = Cal.extractCalendarUrl(incomingText)
+        if (calUrl) {
+          const { handleCalendarInput } = require('../bot/trialOnboarding')
+          await handleCalendarInput(business, { url: calUrl, text: incomingText })
+          console.log(`[Owner] calendar link from ${business.business_name}`)
+          return
+        }
+      } catch (e) { console.error('[Owner] calendar link check failed:', e.message) }
+
+      // v204/v206: is the bot waiting on an answer from this owner (e.g. "book all
+      // imported services instantly?", "text me your calendar link")? A bare
+      // yes/no, a link, or screenshots resolve it here instead of reaching the
+      // model with no idea what was being agreed to. Runs before the booking-page
+      // import so screenshots sent for the bookings step go to the right place.
+      try {
+        const { handlePendingOwnerReply } = require('../bot/trialOnboarding')
+        const pendingReply = await handlePendingOwnerReply(business, incomingText, mediaUrls)
+        if (pendingReply) { if (pendingReply !== '__sent__') await sendSMS(toNumber, customerPhone, pendingReply); console.log(`[Owner] Pending question answered for ${business.business_name}`); return }
+      } catch (e) { console.error('[Owner] pending reply check failed:', e.message) }
+
+      // v206: screenshots of a calendar outside the setup step ("here's next
+      // week", "add these appointments"). Photos with no words and no open
+      // question still go to the setup-source path below (menu photo).
+      if (mediaUrls && mediaUrls.length && /\b(calendar|schedule|appointments?|bookings?|booked|clients?|week|import|add these|here'?s)\b/i.test(incomingText)) {
+        const { handleCalendarInput } = require('../bot/trialOnboarding')
+        await handleCalendarInput(business, { mediaUrls, text: incomingText })
+        console.log(`[Owner] calendar screenshots from ${business.business_name}`)
+        return
+      }
+
       {
         const ob = business.onboarding || {}
         const looksLikeSource = /https?:\/\/|\.(com|net|co|io|app|biz|salon|beauty)\b/i.test(incomingText) || (mediaUrls && mediaUrls.length)
@@ -436,24 +472,17 @@ router.post('/sms', validateTwilio, async (req, res) => {
         }
       }
 
-      // v204: is the bot waiting on an answer from this owner (e.g. "book all
-      // imported services instantly?")? A bare yes/no resolves it here instead
-      // of reaching the model with no idea what was being agreed to.
-      try {
-        const { handlePendingOwnerReply } = require('../bot/trialOnboarding')
-        const pendingReply = await handlePendingOwnerReply(business, incomingText)
-        if (pendingReply) { if (pendingReply !== '__sent__') await sendSMS(toNumber, customerPhone, pendingReply); console.log(`[Owner] Pending question answered for ${business.business_name}`); return }
-      } catch (e) { console.error('[Owner] pending reply check failed:', e.message) }
-
       let ownerReply
       if (isFirstContact) {
         ownerReply = getOwnerWelcome(business)
       } else {
-        ownerReply = await handleOwnerMessage(business, incomingText)
+        ownerReply = await handleOwnerMessage(business, incomingText, mediaUrls)
       }
 
-      await sendSMS(toNumber, customerPhone, ownerReply)
-      console.log(`[Owner] Replied to ${business.business_name} owner`)
+      if (ownerReply) {   // null = a tool already texted the owner directly (v206 calendar import)
+        await sendSMS(toNumber, customerPhone, ownerReply)
+        console.log(`[Owner] Replied to ${business.business_name} owner`)
+      }
       return
     }
 
