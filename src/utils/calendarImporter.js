@@ -770,6 +770,40 @@ async function listNoPhone(businessId) {
   return [...new Set((appts || []).filter(a => isPlaceholder(a.customer_phone) && a.customer_name).map(a => a.customer_name))]
 }
 
+// ── Placeholder phone matching (scheduler, every 30 min) ─────────────────────
+// Imported appointments without a phone get one as soon as a matching client
+// shows up in customers (CSV upload in the dashboard, a booking by text, a
+// later calendar read). Exact full-name match, or a first name that is unique
+// in their client list. Owner is told once per batch.
+async function matchPlaceholderPhones() {
+  const today = new Date().toISOString().slice(0, 10)
+  const { data: rows, error } = await supabase.from('appointments').select('id, business_id, customer_name, customer_phone').like('customer_phone', 'nophone-%').gte('appointment_date', today).neq('status', 'cancelled').limit(2000)
+  if (error || !rows?.length) return
+  const byBiz = new Map(); for (const r of rows) { if (!byBiz.has(r.business_id)) byBiz.set(r.business_id, []); byBiz.get(r.business_id).push(r) }
+  const { sendSMS } = require('./sms')
+  for (const [bizId, appts] of byBiz) {
+    try {
+      const customers = await loadCustomers(bizId)
+      if (!customers.length) continue
+      const lookup = phoneLookup(customers)
+      const matched = []
+      for (const a of appts) {
+        const c = lookup(a.customer_name); if (!c) continue
+        const { error: e2 } = await supabase.from('appointments').update({ customer_phone: c.phone }).eq('id', a.id)
+        if (!e2) matched.push(a.customer_name)
+      }
+      if (!matched.length) continue
+      const names = [...new Set(matched)]
+      const left = await listNoPhone(bizId)
+      const { data: biz } = await supabase.from('businesses').select('sms_number, owner_phone').eq('id', bizId).maybeSingle()
+      if (biz?.sms_number && biz?.owner_phone) {
+        await sendSMS(biz.sms_number, biz.owner_phone, `Matched phone numbers from your client list for ${names.slice(0, 6).join(', ')}${names.length > 6 ? ` and ${names.length - 6} more` : ''}, so they'll get reminders.${left.length ? ` Still missing: ${left.slice(0, 6).join(', ')}${left.length > 6 ? ` and ${left.length - 6} more` : ''}.` : ''}`).catch(() => {})
+      }
+      console.log(`[CalImport] matched ${names.length} placeholder phone(s) for business ${bizId}`)
+    } catch (e) { console.error('[CalImport] placeholder match failed:', e.message) }
+  }
+}
+
 // ── Feed sync (scheduler, every 15 min) ──────────────────────────────────────
 async function syncCalendarFeeds() {
   const { data: rows, error } = await supabase.from('businesses').select('id, business_name, owner_phone, sms_number, timezone, onboarding, status').eq('onboarding->calendar_feed->>active', 'true').in('status', ['trial', 'active'])
@@ -846,7 +880,7 @@ async function setFeedActive(businessId, active) {
 
 module.exports = {
   extractCalendarUrl, platformFromUrl, PLATFORM, bookingsQuestion,
-  importFromCalendarLink, importFromScreenshots, syncCalendarFeeds, setFeedActive,
+  importFromCalendarLink, importFromScreenshots, syncCalendarFeeds, setFeedActive, matchPlaceholderPhones,
   parseNamePhonePairs, attachClientPhone, listNoPhone, importSummary,
   // exported for tests
   parseIcs, normalizeCalendarUrl, SYNC_DAYS, IMPORT_NOTE, _resetUidCache: () => { uidSupport = { ok: null, at: 0 } }
