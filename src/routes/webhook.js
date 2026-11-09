@@ -406,8 +406,13 @@ router.post('/sms', validateTwilio, async (req, res) => {
       // walkthrough, which was removed (Brandon: "remove demo, I think it's dumb").
       // Owner replies SETUP → asked for their booking link / menu photo → the
       // next owner message carrying a link or photo is captured and forwarded.
-      if (/^\s*(setup|set up|free setup|setup call)\s*[.!?]?\s*$/i.test(incomingText)) {
-        const { setupOfferReply, recordSetupRequest } = require('../bot/trialOnboarding')
+      // v207: SETUP (or CONTINUE) with the checklist already started resumes at
+      // the open question instead of asking for the link again.
+      if (/^\s*(setup|set up|free setup|setup call|continue|resume|finish setup|continue setup)\s*[.!?]?\s*$/i.test(incomingText)) {
+        const { setupOfferReply, recordSetupRequest, resumeSetup } = require('../bot/trialOnboarding')
+        const resumed = await resumeSetup(business).catch(e => { console.error('[Owner] resume failed:', e.message); return false })
+        if (resumed) return
+        if (/^\s*(continue|resume|finish setup|continue setup)/i.test(incomingText)) { await sendSMS(toNumber, customerPhone, `Nothing to pick up yet. Reply SETUP and I'll walk you through it.`); return }
         await sendSMS(toNumber, customerPhone, setupOfferReply(business))
         recordSetupRequest(business).catch(e => console.error('[Owner] setup request record failed:', e.message))
         return
@@ -480,6 +485,19 @@ router.post('/sms', validateTwilio, async (req, res) => {
       }
 
       if (ownerReply) {   // null = a tool already texted the owner directly (v206 calendar import)
+        // v207: a setup question is still open and this text didn't answer it.
+        // Answer what they said, then bring the question back so the checklist
+        // never silently stalls (the gap that stranded the deposits step).
+        try {
+          const sbQ = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+          const { data: ob } = await sbQ.from('businesses').select('onboarding').eq('id', business.id).maybeSingle()
+          const pq = ob?.onboarding?.pending_question
+          if (pq?.kind && !isFirstContact) {
+            const { shortQuestion } = require('../bot/trialOnboarding')
+            const short = shortQuestion({ ...business, onboarding: ob.onboarding }, pq.kind)
+            if (short && !/still on setup|still need/i.test(ownerReply)) ownerReply = `${ownerReply}\n\n${short}`
+          }
+        } catch (e) { console.error('[Owner] re-ask check failed:', e.message) }
         await sendSMS(toNumber, customerPhone, ownerReply)
         console.log(`[Owner] Replied to ${business.business_name} owner`)
       }

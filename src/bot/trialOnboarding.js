@@ -181,7 +181,7 @@ async function phoneAlreadyUsedTrial(rawPhone, userId) {
 // from the scheduler in the same minute never overwrite each other.
 async function markStep(businessId, current, key, extra = {}) {
   const { data } = await supabase.from('businesses').select('onboarding').eq('id', businessId).maybeSingle()
-  const next = { ...(current || {}), ...(data?.onboarding || {}), [key]: new Date().toISOString(), ...extra }
+  const next = { ...(current || {}), ...(data?.onboarding || {}), ...(key ? { [key]: new Date().toISOString() } : {}), ...extra }
   await supabase.from('businesses').update({ onboarding: next }).eq('id', businessId)
   return next
 }
@@ -257,10 +257,35 @@ async function sendTrialWelcome(biz) {
 // ── SETUP: the free setup call, offered by text ───────────────────────────────
 // Owner replies SETUP (from the welcome or any nudge) and gets the booking link.
 function setupCallLink() { return `${SITE_URL}/#setup-call` }
+// v207: SETUP is a short guided checklist, not a one-off ask. The owner hears
+// what's coming (how many questions, how long, that they can stop and resume,
+// and that a human will do it for them if they'd rather) before the first one.
 function setupOfferReply(biz) {
-  return `Easy. Send me the link to your current booking page or website (or a photo of your service menu) ` +
-    `and we'll set up your services, hours and FAQs for you today. ` +
-    `Rather talk it through? Book 20 minutes here: ${setupCallLink()}`
+  return `Let's get you set up. It's about 6 quick questions, 3 minutes total, and I save as we go so you can stop and pick up later. ` +
+    `Reply SKIP to any question, or HELP any time and a real person finishes it with you (or book 20 minutes: ${setupCallLink()}).\n\n` +
+    `First: send me the link to your current booking page or website, or a photo of your service menu. I'll load your services and hours from it.`
+}
+// Owner texted SETUP again (or CONTINUE) with the checklist already started:
+// pick up exactly where they left off instead of starting over.
+async function resumeSetup(biz) {
+  const b = await freshBiz(biz.id) || biz
+  const ob = b.onboarding || {}
+  const say = async (m) => { await sendSMS(b.sms_number, b.owner_phone, m); try { require('./ownerCommands').noteOwnerOutbound(b.id, m) } catch {} }
+  if (ob.setup_complete_at) {
+    await say(`You're already set up. Anything you want changed (services, hours, deposits, staff), just tell me here. Want a walkthrough with a person? ${setupCallLink()}`)
+    return true
+  }
+  const pq = ob.pending_question
+  if (pq?.kind && (SETUP_STEPS.includes(pq.kind) || pq.kind === 'import_phones')) {
+    const qs = [].concat(questionFor(b, pq.kind)).filter(Boolean)
+    if (qs.length) { await say(`Picking up where we left off. ${qs[0]}`); for (const q of qs.slice(1)) await say(q); await setPending(b, pq.kind); return true }
+  }
+  if (ob.auto_import_at || ob.import_mode_at) {
+    await say(`Picking up where we left off.`)
+    await advanceSetup(b, 'import_mode')
+    return true
+  }
+  return false
 }
 
 // The link or photo the owner sent after SETUP. Stored on onboarding, acked
@@ -331,20 +356,23 @@ async function announceImport(biz, result, { url = null } = {}) {
   if (!bits.length) return null
   const page = fresh?.profile_slug ? `${SITE_URL}/book/${fresh.profile_slug}` : null
   const msg = `Done. I loaded ${bits.join(', ')} from your page.` + (page ? ` Your booking page is live: ${page}` : '') +
-    (names.length
-      ? ` Quick question: should clients be able to book all of these instantly? Reply YES, or NO if you want to approve each request first. Anything to change, like "make Balayage $240", just tell me.`
-      : ` Anything to change, just tell me.`)
+    ` Anything to change, like "make Balayage $240", just tell me.`
   await sendSMS(biz.sms_number, biz.owner_phone, msg)
   try { require('./ownerCommands').noteOwnerOutbound(biz.id, msg) } catch (e) { console.error('[Setup] owner note failed:', e.message) }
   const extra = { auto_import: { url, services: names.length, hours: result.hours, photos: result.photos } }
-  if (names.length) extra.pending_question = { kind: 'import_mode', at: new Date().toISOString(), services: names.length }
   await markStep(biz.id, fresh?.onboarding || biz.onboarding, 'auto_import_at', extra)
+  // v207: the checklist itself asks the first question (with its "(1 of N)"
+  // label) so the import text and the questions read as one flow.
+  const b = await freshBiz(biz.id)
+  if (b) await advanceSetup(b, null)
   return msg
 }
 
 const PENDING_QUESTION_TTL_MS = 48 * 60 * 60 * 1000
 const YES_RE = /^\s*(y|yes|yeah|yep|yup|ya|sure|ok|okay|correct|instant|instantly|all|do it|sounds good|looks good|perfect|yes please|yes all)\s*[.!]*\s*$/i
 const NO_RE  = /^\s*(n|no|nope|nah|approve|approval|approve first|request|requests|not yet|no thanks|none|skip)\s*[.!]*\s*$/i
+const SKIP_RE = /^\s*(skip|skip it|skip this|pass|next|later|not now|maybe later)\s*[.!]*\s*$/i
+const HELP_RE = /^\s*help\s*[.!?]*\s*$|\b(someone|somebody|a person|you guys|can you|could you|can wexly|you)\b[^.?!]{0,16}\b(do (this|it|that|the setup)|set (this|it) up|finish|handle|take care|walk me)\b|\bdo it for me\b|\bfor me\b.*\bset|\btalk to (a )?(human|person|someone|real)|\b(call|phone) me\b/i
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
 // ── Setup checklist (v204) ────────────────────────────────────────────────────
@@ -375,30 +403,65 @@ async function setPending(biz, kind, extra = {}) {
   await supabase.from('businesses').update({ onboarding: next }).eq('id', biz.id)
   return next
 }
+// A step was answered (or skipped) when its `<step>_at` marker exists.
+const stepDone = (ob, step) => !!ob[`${step}_at`]
 function stepNeeded(biz, services, step, ctx = {}) {
   const ob = biz.onboarding || {}
+  if (stepDone(ob, step)) return false
   const anyDeposit = services.some(sv => sv.deposit_amount && String(sv.deposit_amount).trim() !== '' && String(sv.deposit_amount) !== '0')
   const hasHours = Array.isArray(biz.hours) && biz.hours.some(h => h && (h.open === true || (h.open && h.close)))
   const hasStaff = Array.isArray(biz.staff_members) && biz.staff_members.some(st => st && st.name)
   const hasDepositMethod = (biz.stripe_account_connected && biz.stripe_account_id) || /^https?:\/\//i.test(String(biz.payment_link || ''))
+  if (step === 'import_mode') return services.length > 0 && !ob.import_mode
   if (step === 'deposits') return services.length > 0
   if (step === 'deposit_method') return anyDeposit && !hasDepositMethod
   if (step === 'hours') return !hasHours
   if (step === 'staff') return !hasStaff
-  if (step === 'bookings') return !ob.bookings_at && !ob.calendar_feed && !(ctx.importedCount > 0)
+  if (step === 'bookings') return !ob.calendar_feed && !(ctx.importedCount > 0)
   return false
 }
-// Returns a string, or an array of strings sent as consecutive texts.
-function questionFor(biz, step, services) {
+// "(2 of 5)" for the step being asked: counted over the steps this account
+// actually gets (answered ones plus the ones still needed), so skipped-because-
+// already-imported steps don't inflate the total.
+function progressLabel(biz, services, step, ctx = {}) {
+  const ob = biz.onboarding || {}
+  const shown = SETUP_STEPS.filter(s => stepDone(ob, s) || s === step || stepNeeded(biz, services, s, ctx))
+  const n = shown.indexOf(step) + 1
+  return n > 0 ? `(${n} of ${shown.length}) ` : ''
+}
+// Returns a string, or an array of strings sent as consecutive texts. `label`
+// is the progress prefix; a short tail reminds them SKIP/HELP exist.
+const SKIP_TAIL = ` Reply SKIP to pass.`
+function questionFor(biz, step, services, label = '') {
   switch (step) {
-    case 'deposits': return `Next: do any services need a deposit to book? Reply NO, or tell me which and how much, like "Balayage $50, Color $40" or "all $25".`
-    case 'deposit_method': return `How should deposits be collected? Reply STRIPE and I'll text you a link to connect your Stripe (clients pay by card and bookings confirm themselves), or paste your payment link (Venmo, Zelle, Square, PayPal) and I'll send that to clients and tell you when they say they've paid so you can confirm.`
-    case 'hours': return `What are your hours? Something like "Tue to Sat 9 to 6, closed Sun and Mon" is perfect.`
-    case 'staff': return `Almost done: is it just you taking appointments? Reply JUST ME, or the names of everyone who does, like "Mia, Jordan".`
+    case 'import_mode': return `${label}Should clients be able to book all your services instantly, or do you want to approve each one first? Reply INSTANT or APPROVE.`
+    case 'deposits': return `${label}Do any services need a deposit to book? Reply NO, or tell me which and how much, like "Balayage $50, Color $40" or "all $25".`
+    case 'deposit_method': return `${label}How should deposits be collected? Reply STRIPE and I'll text you a link to connect your Stripe (clients pay by card, bookings confirm themselves), or paste your payment link (Venmo, Zelle, Square, PayPal) and I'll send that to clients and tell you when they say they've paid.`
+    case 'hours': return `${label}What are your hours? Something like "Tue to Sat 9 to 6, closed Sun and Mon" is perfect.${SKIP_TAIL}`
+    case 'staff': return `${label}Is it just you taking appointments? Reply JUST ME, or the names of everyone who does, like "Mia, Jordan".`
     case 'bookings': {
       const { bookingsQuestion, platformFromUrl } = require('../utils/calendarImporter')
-      return bookingsQuestion(platformFromUrl(biz.onboarding?.auto_import?.url || biz.onboarding?.setup_source?.url || ''))
+      const qs = bookingsQuestion(platformFromUrl(biz.onboarding?.auto_import?.url || biz.onboarding?.setup_source?.url || ''))
+      qs[0] = label + qs[0].replace(/^Last thing: (\w)/, (_, c) => c.toUpperCase())
+      return qs
     }
+    case 'import_phones': {
+      const names = Array.isArray(biz.onboarding?.import_no_phone) ? biz.onboarding.import_no_phone : []
+      return `Still missing a phone number for ${names.slice(0, 6).join(', ') || 'a few imported clients'}. Reply like "Jess 310-555-1234", upload your client list in the app under Customers, or SKIP.`
+    }
+    default: return null
+  }
+}
+// The one-line version appended to an unrelated reply while a question is open.
+function shortQuestion(biz, step) {
+  switch (step) {
+    case 'import_mode': return `Still on setup: book instantly or approve each one first? Reply INSTANT or APPROVE.`
+    case 'deposits': return `Still on setup: any deposits? Reply NO, or like "Balayage $50".`
+    case 'deposit_method': return `Still on setup: deposits by STRIPE, or paste your payment link?`
+    case 'hours': return `Still on setup: what are your hours? (Or SKIP.)`
+    case 'staff': return `Still on setup: just you, or who else takes appointments?`
+    case 'bookings': return `Still on setup: want your upcoming appointments brought over? Text me your calendar link or screenshots, or SKIP.`
+    case 'import_phones': return `Still need numbers for ${(biz.onboarding?.import_no_phone || []).slice(0, 3).join(', ') || 'a few clients'}. Reply like "Jess 310-555-1234" or SKIP.`
     default: return null
   }
 }
@@ -412,7 +475,7 @@ async function advanceSetup(biz, fromStep) {
   for (; i < SETUP_STEPS.length; i++) if (stepNeeded(b, svcs, SETUP_STEPS[i], ctx)) break
   if (i < SETUP_STEPS.length) {
     const step = SETUP_STEPS[i]
-    const qs = [].concat(questionFor(b, step, svcs)).filter(Boolean)
+    const qs = [].concat(questionFor(b, step, svcs, progressLabel(b, svcs, step, ctx))).filter(Boolean)
     await setPending(b, step)
     for (const q of qs) {
       await sendSMS(b.sms_number, b.owner_phone, q)
@@ -510,6 +573,34 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
   const say = async (m) => { await sendSMS(biz.sms_number, biz.owner_phone, m); note(m) }
   const media = Array.isArray(mediaUrls) ? mediaUrls : []
 
+  // v207: two words work on every step.
+  // SKIP → mark the step done and move on. HELP (or "can someone do this") →
+  // a person finishes it with them; Brandon is alerted with the step they're on.
+  if (SKIP_RE.test(t) && !media.length) {
+    const skipNote = {
+      import_mode: `Okay, leaving booking mode as it is for now. Tell me any time, like "make Balayage need my approval".`,
+      deposits: `Okay, no deposits for now. You can add one any time, like "Balayage needs a $50 deposit".`,
+      deposit_method: `Okay. Deposits stay off until you connect Stripe or send me a payment link.`,
+      hours: `Okay. Text me your hours whenever, or set them in the app.`,
+      staff: `Okay, I'll assume it's just you. Tell me names any time to add staff.`,
+      bookings: `No problem. Any time you want them in, text me your calendar link or screenshots of your calendar.`,
+      import_phones: `Okay. Add a number any time like "Jess 310-555-1234", or upload your client list in the app under Customers.`
+    }[pq.kind]
+    if (skipNote) {
+      await say(skipNote)
+      const marker = pq.kind === 'import_phones' ? {} : { [`${pq.kind}_at`]: new Date().toISOString(), [`${pq.kind}_skipped`]: true }
+      await setPending(biz, null, marker)
+      if (pq.kind !== 'import_phones') await advanceSetup(biz, pq.kind)
+      return '__sent__'
+    }
+  }
+  if (HELP_RE.test(t)) {
+    await say(`You got it. Someone from Wexly will text you shortly and finish the setup with you. Or grab a time that suits you: ${setupCallLink()} Your number works for clients in the meantime.`)
+    await setPending(biz, pq.kind, { help_requested_at: new Date().toISOString(), help_requested_step: pq.kind })
+    notifyHelpRequest(biz, pq.kind).catch(e => console.error('[Setup] help alert failed:', e.message))
+    return '__sent__'
+  }
+
   if (pq.kind === 'bookings') {
     const C = require('../utils/calendarImporter')
     const url = C.extractCalendarUrl(t)
@@ -570,13 +661,22 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
   }
 
   if (pq.kind === 'deposits') {
-    if (NO_RE.test(t)) {
+    const hasAmount = /\$\s*\d|\d+\s*(dollars|bucks|%)/i.test(t)
+    // "no", "no deposits", "I don't take deposits", "not right now", "none of them"
+    if (!hasAmount && (NO_RE.test(t) || /\b(no deposits?|don'?t (take|do|need|require|want)|not (right )?now|not yet|none|nothing|later|maybe later)\b/i.test(t))) {
       await say(`No deposits. You can add one any time, like "Balayage needs a $50 deposit".`)
       await setPending(biz, null, { deposits_at: new Date().toISOString() })
       await advanceSetup(biz, 'deposits'); return '__sent__'
     }
+    // "yes", "yes some do", "a few", "all of them" without an amount → ask which and how much
+    if (!hasAmount && (YES_RE.test(t) || /^\s*(yes|yeah|yep|some|a few|most|all( of them)?|they all do|some do|yes some)\b/i.test(t))) {
+      const { data: svcList } = await supabase.from('services').select('name').eq('business_id', biz.id).neq('active', false).order('sort_order').limit(8)
+      const names = (svcList || []).map(s => s.name)
+      await say(`Which ones and how much? Reply like "${names[0] || 'Balayage'} $50${names[1] ? `, ${names[1]} $40` : ''}" or "all $25".${names.length ? ` Your services: ${names.join(', ')}${(svcList || []).length >= 8 ? '...' : ''}.` : ''}`)
+      await setPending(biz, 'deposits'); return '__sent__'
+    }
     const parsed = parseDeposits(t)
-    if (!parsed) return null  // let the model handle it; question stays open
+    if (!parsed) return null  // let the model handle it; question stays open and gets re-asked
     const { data: services } = await supabase.from('services').select('id, name').eq('business_id', biz.id).neq('active', false)
     const svcs = services || []
     const applied = [], missed = []
@@ -615,12 +715,12 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
       await setPending(biz, null, { deposit_method: 'link', deposit_method_at: new Date().toISOString() })
       await advanceSetup(biz, 'deposit_method'); return '__sent__'
     }
-    if (NO_RE.test(t)) { await say(`No problem. Deposits stay off until you connect Stripe or send me a payment link.`); await setPending(biz, null); await advanceSetup(biz, 'deposit_method'); return '__sent__' }
+    if (NO_RE.test(t)) { await say(`No problem. Deposits stay off until you connect Stripe or send me a payment link.`); await setPending(biz, null, { deposit_method_at: new Date().toISOString(), deposit_method_skipped: true }); await advanceSetup(biz, 'deposit_method'); return '__sent__' }
     return null
   }
 
   if (pq.kind === 'hours') {
-    if (NO_RE.test(t)) { await say(`Okay, you can set hours any time in your dashboard or just text them to me.`); await setPending(biz, null); await advanceSetup(biz, 'hours'); return '__sent__' }
+    if (NO_RE.test(t)) { await say(`Okay, you can set hours any time in your dashboard or just text them to me.`); await setPending(biz, null, { hours_at: new Date().toISOString(), hours_skipped: true }); await advanceSetup(biz, 'hours'); return '__sent__' }
     let week = null
     try { week = await parseHours(t) } catch (e) { console.error('[Setup] hours parse failed:', e.message) }
     if (!week) return null
@@ -652,6 +752,23 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
 function setupSourceAck(biz) {
   return `Got it. We'll set everything up from that and text you here when it's done, usually within a few hours. ` +
     `Anything you want handled differently from what's on there, just tell me.`
+}
+
+// v207: owner replied HELP mid-checklist. Brandon gets the step they stalled on.
+async function notifyHelpRequest(biz, step) {
+  const OWNER_EMAIL = process.env.OWNER_NOTIFICATION_EMAIL || 'hello@getwexly.com'
+  const OWNER_PHONE = process.env.OWNER_NOTIFICATION_PHONE
+  const who = `${biz.owner_name || 'Owner'} at ${biz.business_name}`
+  const line = `${who} wants a person to finish setup (stuck at: ${step}). Cell: ${formatPhone(biz.owner_phone)} · Wexly number: ${formatPhone(biz.sms_number)}`
+  try {
+    const { sendEmail } = require('../utils/emailService')
+    await sendEmail({
+      from: { email: 'hello@getwexly.com', name: 'Wexly' }, to: OWNER_EMAIL,
+      subject: `HELP during setup: ${biz.business_name}`,
+      html: `<div style="font-family:Helvetica,Arial,sans-serif;max-width:480px;margin:40px auto;"><h2 style="color:#0F0F0E;">Owner asked for a hand with setup</h2><p><strong>${who}</strong></p><p>Stalled at step: <strong>${step}</strong><br>Cell: ${formatPhone(biz.owner_phone)}<br>Email: ${biz.email || '—'}<br>Wexly number: ${formatPhone(biz.sms_number)}</p><p>They were told someone will text them shortly. Texting their cell from the Wexly number picks the checklist up where it stopped.</p><p><a href="${SITE_URL}/admin.html" style="display:inline-block;margin-top:12px;background:#1A6B4A;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;">Open admin</a></p></div>`
+    })
+  } catch (e) { console.error('[Setup] help email failed:', e.message) }
+  if (OWNER_PHONE && process.env.TWILIO_PHONE_NUMBER) await sendSMS(process.env.TWILIO_PHONE_NUMBER, OWNER_PHONE, `🙋 ${line}`).catch(e => console.error('[Setup] help SMS failed:', e.message))
 }
 
 // The owner asked for setup. Record it (admin drawer shows "Asked for setup")
@@ -755,9 +872,41 @@ async function runTrialOnboardingDrip() {
         await markStep(biz.id, ob, 'services_nudge_at'); ob.services_nudge_at = now.toISOString()
       }
 
+      // v207: a checklist question left open. One re-ask after 3 quiet hours,
+      // one "finish or hand it off?" after 20, both inside 9am-8pm local, then
+      // silence. The question stays answerable the whole time (48h TTL, and
+      // SETUP/CONTINUE always resumes).
+      const pq = ob.pending_question
+      if (pq?.kind && pq.at) {
+        const quietMin = (now - new Date(pq.at)) / 60000
+        const localHour = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: biz.timezone || 'America/Los_Angeles', hour: 'numeric', hour12: false }).format(now))
+        const daytime = localHour >= 9 && localHour < 20
+        const nudges = ob.setup_nudges || {}
+        const key = `${pq.kind}@${pq.at}`
+        const n1 = nudges[key]
+        const sinceN1 = n1?.at ? (now - new Date(n1.at)) / 60000 : Infinity
+        if (daytime && quietMin >= 180 && n1 == null) {
+          const short = shortQuestion(biz, pq.kind)
+          if (short) {
+            await sendSMS(from, to, `${short.replace(/^Still on setup: /, 'Whenever you have a sec, still on setup: ').replace(/^Still need/, 'Whenever you have a sec, still need')} Reply HELP if you'd rather a person finish it with you.`)
+            const upd = { ...nudges, [key]: { n: 1, at: now.toISOString() } }
+            await markStep(biz.id, ob, null, { setup_nudges: upd }); ob.setup_nudges = upd
+            sent++
+          }
+        } else if (daytime && quietMin >= 20 * 60 && n1?.n === 1 && sinceN1 >= 6 * 60) {
+          const { data: svcRows } = await supabase.from('services').select('id, name, deposit_amount, booking_mode').eq('business_id', biz.id).neq('active', false)
+          const left = SETUP_STEPS.filter(s => s === pq.kind || stepNeeded(biz, svcRows || [], s)).length
+          await sendSMS(from, to, `Your setup is ${left === 1 ? 'one question' : `${left} quick questions`} from done. Want to finish it now, or have someone do it for you? Reply CONTINUE or HELP. (Clients can already book by text either way.)`)
+          const upd = { ...nudges, [key]: { n: 2, at: now.toISOString() } }
+          await markStep(biz.id, ob, null, { setup_nudges: upd }); ob.setup_nudges = upd
+          sent++
+        }
+      }
+
       // Setup interview offer on day 2, if never started. It's seven questions;
-      // day 0 is for one thing (reply "today"), not a questionnaire.
-      if (!ob.interview_offered_at && ageMin >= 44 * 60 && !biz.interview_state) {
+      // day 0 is for one thing (reply "today"), not a questionnaire. v207: not
+      // for accounts that went through the SETUP checklist (they'd be asked twice).
+      if (!ob.interview_offered_at && ageMin >= 44 * 60 && !biz.interview_state && !ob.setup_source_at && !ob.auto_import_at && !ob.import_mode_at) {
         const { startSetupInterview } = require('./setupInterview')
         await startSetupInterview(biz)
         await markStep(biz.id, ob, 'interview_offered_at'); ob.interview_offered_at = now.toISOString()
@@ -820,6 +969,6 @@ async function runTrialOnboardingDrip() {
 module.exports = {
   normalizeUSPhone, formatPhone,
   sendVerificationCode, verifyCode, isRecentlyVerified, phoneAlreadyUsedTrial,
-  lineTypeCheck, activateInstantTrial, sendTrialWelcome, ensureProfileSlug, profileUrl, runAutoImport, announceImport, handlePendingOwnerReply, handleCalendarInput, advanceSetup, setupOfferReply, recordSetupRequest, recordSetupSource, setupSourceAck, expiredOwnerReply,
+  lineTypeCheck, activateInstantTrial, sendTrialWelcome, ensureProfileSlug, profileUrl, runAutoImport, announceImport, handlePendingOwnerReply, handleCalendarInput, advanceSetup, resumeSetup, shortQuestion, setupOfferReply, recordSetupRequest, recordSetupSource, setupSourceAck, expiredOwnerReply,
   runTrialOnboardingDrip, addCardLink, TRIAL_DAYS
 }

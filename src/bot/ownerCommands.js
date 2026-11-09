@@ -246,7 +246,7 @@ const OWNER_TOOLS = [
   },
   {
     name: 'update_services',
-    description: 'Change existing services: price, duration, whether booking needs the owner\'s approval, a deposit, or remove a service. Use for "make Balayage require approval", "Balayage needs my approval", "all services need approval", "make everything instant book", "Balayage is $240 now", "haircut takes 45 min", "remove Bang Trim", "Botox needs a quote first". Match the service by name (partial is fine) or use "all".',
+    description: 'Change existing services: price, duration, whether booking needs the owner\'s approval, a deposit, a booking window (earliest/latest start time of day), or remove a service. Use for "make Balayage require approval", "all services need approval", "make everything instant book", "Balayage is $240 now", "haircut takes 45 min", "remove Bang Trim", "Botox needs a quote first", "don\'t book color after 2pm" (latest_start 14:00), "no cuts before 11" (earliest_start 11:00), "lift the cutoff on color" (clear_window). Match the service by name (partial is fine) or use "all".',
     input_schema: {
       type: 'object',
       properties: {
@@ -255,6 +255,9 @@ const OWNER_TOOLS = [
         price: { type: 'number', description: 'New price in dollars' },
         duration_mins: { type: 'number', description: 'New length in minutes' },
         deposit_amount: { type: 'number', description: 'Deposit in dollars; 0 removes the deposit' },
+        latest_start: { type: 'string', description: 'Latest START time of day for this service, 24h "HH:MM" ("no color after 2pm" = "14:00"). The appointment may run past it; it just has to begin by then.' },
+        earliest_start: { type: 'string', description: 'Earliest start time of day, 24h "HH:MM"' },
+        clear_window: { type: 'boolean', description: 'true removes any earliest/latest start limits' },
         remove: { type: 'boolean', description: 'true to remove the service from the menu' }
       },
       required: ['services']
@@ -1043,7 +1046,7 @@ async function executeOwnerTool(toolName, input, business) {
       // (deposits, how to collect them, hours, staff), a few seconds after this reply lands.
       const ob = business.onboarding || {}
       if (added.length && !ob.setup_complete_at && !ob.pending_question) {
-        setTimeout(() => { try { require('./trialOnboarding').advanceSetup(business, 'import_mode').catch(e => console.error('[Setup] advance after add_services failed:', e.message)) } catch (e) { console.error('[Setup] advance failed:', e.message) } }, 4000)
+        setTimeout(() => { try { require('./trialOnboarding').advanceSetup(business, null).catch(e => console.error('[Setup] advance after add_services failed:', e.message)) } catch (e) { console.error('[Setup] advance failed:', e.message) } }, 4000)
       }
       return `✅ ${parts.join('. ')}. Clients can book these now.`
     }
@@ -1064,10 +1067,18 @@ async function executeOwnerTool(toolName, input, business) {
       if (input.price !== undefined && input.price !== null && !isNaN(Number(input.price))) patch.price = Math.max(0, Number(input.price))
       if (input.duration_mins) patch.duration_mins = Math.min(Math.max(parseInt(input.duration_mins) || 60, 5), 24 * 60)
       if (input.deposit_amount !== undefined && input.deposit_amount !== null && !isNaN(Number(input.deposit_amount))) patch.deposit_amount = Number(input.deposit_amount) > 0 ? Number(input.deposit_amount) : null
+      const hhmm = (v) => { const m = String(v || '').trim().match(/^(\d{1,2}):(\d{2})$/); return m && +m[1] < 24 && +m[2] < 60 ? `${String(m[1]).padStart(2, '0')}:${m[2]}` : null }
+      if (input.clear_window) { patch.earliest_start = null; patch.latest_start = null }
+      if (hhmm(input.latest_start)) patch.latest_start = hhmm(input.latest_start)
+      if (hhmm(input.earliest_start)) patch.earliest_start = hhmm(input.earliest_start)
       if (input.remove) patch.active = false
-      if (!Object.keys(patch).length) return `What should change about ${targets.map(t => t.name).join(', ')}? Price, length, approval, deposit, or remove it.`
+      if (!Object.keys(patch).length) return `What should change about ${targets.map(t => t.name).join(', ')}? Price, length, approval, deposit, a start-time cutoff, or remove it.`
       const { error } = await supabase.from('services').update(patch).in('id', targets.map(t => t.id))
-      if (error) { console.error('[Owner] update_services failed:', error.message); return `I couldn't save that change. Try again in a moment.` }
+      if (error) {
+        console.error('[Owner] update_services failed:', error.message)
+        if (/earliest_start|latest_start/.test(error.message || '')) return `Start-time cutoffs aren't switched on for this account yet. Everything else about the service is unchanged; try again later or ask support@getwexly.com.`
+        return `I couldn't save that change. Try again in a moment.`
+      }
       const names = isAll ? `all ${targets.length} services` : targets.map(t => t.name).join(', ')
       const what = []
       if (patch.active === false) what.push('removed from your menu')
@@ -1077,6 +1088,13 @@ async function executeOwnerTool(toolName, input, business) {
       if (patch.price !== undefined) what.push(`now $${patch.price}`)
       if (patch.duration_mins) what.push(`now ${patch.duration_mins} min`)
       if ('deposit_amount' in patch) what.push(patch.deposit_amount ? `deposit set to $${patch.deposit_amount}` : 'deposit removed')
+      const { formatTime: ft } = require('../utils/dateHelpers')
+      if (input.clear_window && !patch.latest_start && !patch.earliest_start) what.push('can start any time you\'re open')
+      else {
+        if (patch.latest_start && patch.earliest_start) what.push(`only start between ${ft(patch.earliest_start)} and ${ft(patch.latest_start)}`)
+        else if (patch.latest_start) what.push(`last start ${ft(patch.latest_start)}`)
+        else if (patch.earliest_start) what.push(`earliest start ${ft(patch.earliest_start)}`)
+      }
       return `Done. ${names.charAt(0).toUpperCase() + names.slice(1)}: ${what.join(', ')}.`
     }
 

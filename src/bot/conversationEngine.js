@@ -1,7 +1,7 @@
 const Anthropic = require('@anthropic-ai/sdk')
 const { sendBookingNotification, sendEscalationNotification, sendCustomerConfirmationEmail } = require('../utils/emailService')
 const { runQualificationFlow, runIntakeFlow, shouldSendNotification } = require('./proFeatures')
-const { getAvailableSlots, findAvailableStaff, formatDate, formatTime } = require('../utils/dateHelpers')
+const { getAvailableSlots, findAvailableStaff, formatDate, formatTime, applyServiceWindow, serviceWindowText } = require('../utils/dateHelpers')
 const { sendSMS } = require('../utils/sms')
 
 // ── Plan helpers ─────────────────────────────────────────────────────────────
@@ -118,6 +118,7 @@ function buildSystemPrompt(business, profile, today, returningCustomer = null) {
   const servicesText = profile.services.length > 0
     ? profile.services.map(s => {
         let line = `- ${s.name} (${s.duration_mins} min${s.price ? `, ${s.price}` : ''})`
+        if (serviceWindowText(s)) line += ` [${serviceWindowText(s).replace(/^\w/, c => c.toUpperCase())}. Only offer start times inside that window for this service, and say so if they ask for a time outside it.]`
         if (s.booking_mode === 'request') line += ` [REQUIRES APPROVAL — collect their date/time preference and ask if they have reference photos. Then you MUST call the create_appointment tool to submit the request (this creates the pending request AND alerts the owner). Only AFTER the tool succeeds, tell them their request has been sent and they'll get a confirmation once reviewed. Do NOT say it was sent unless you actually called create_appointment.]`
         if (s.booking_mode === 'quote') line += ` [QUOTE REQUIRED — collect details and photos. Then you MUST call the create_appointment tool to submit the quote request (this creates the record AND alerts the owner). Only AFTER the tool succeeds, tell them you've passed it along for a custom quote. Do NOT say you passed it along unless you actually called create_appointment.]`
         if (s.booking_mode === 'class') line += ` [GROUP CLASS — multiple customers can book the same slot up to capacity of ${s.class_capacity || 10} spots. Check availability normally but mention spots remaining.]`
@@ -635,12 +636,16 @@ async function executeTool(toolName, input, context) {
         if (input.time && classBookings >= classCapacity) {
           return { available: false, message: `That class is full (${classCapacity}/${classCapacity} spots taken). Would you like to join the waitlist or pick another time?` }
         }
-        const slots = getAvailableSlots(business, input.date, [], duration, profile.blockedDates, classCapacity, serviceName)
+        const slots = getAvailableSlots(business, input.date, [], duration, profile.blockedDates, classCapacity, serviceName, service)
         return { available: true, slots, preview: slots.slice(0, 6), date: input.date, spots_remaining: classCapacity - classBookings, is_class: true }
       }
 
-      const slots = getAvailableSlots(business, input.date, existing, duration, profile.blockedDates, capacity, serviceName)
-      if (slots.length === 0) return { available: false, message: 'No availability on this date.' }
+      const slots = getAvailableSlots(business, input.date, existing, duration, profile.blockedDates, capacity, serviceName, service)
+      if (slots.length === 0) return { available: false, message: 'No availability on this date.' + (serviceWindowText(service) ? ` (${service.name} ${serviceWindowText(service)}.)` : '') }
+      // v207: a specific time asked for outside this service's booking window gets a clear reason, not a bare "not available"
+      if (input.time && serviceWindowText(service) && !applyServiceWindow([input.time.slice(0, 5)], service).length) {
+        return { available: false, slots, preview: slots.slice(0, 6), date: input.date, message: `${service.name} ${serviceWindowText(service)}, so ${formatTime(input.time)} isn't possible. Available starts: ${slots.slice(0, 6).map(formatTime).join(', ')}.` }
+      }
       // Return ALL slots so Claude can accurately check if a specific requested
       // time (like "2pm") is actually available. Previously this was sliced to
       // the first 6, which made the bot incorrectly say afternoon times weren't
@@ -733,8 +738,11 @@ async function executeTool(toolName, input, context) {
 
       // Check if this specific slot is still available given staff capacity
       if (input.time && serviceForCap?.booking_mode !== 'class') {
-        const slots = getAvailableSlots(business, input.date, existing, serviceForCap?.duration_mins || 60, profile.blockedDates, capacity, input.service_name)
-        if (!slots.includes(input.time)) return { success: false, error: 'That slot is no longer available — all staff are booked at that time.' }
+        const slots = getAvailableSlots(business, input.date, existing, serviceForCap?.duration_mins || 60, profile.blockedDates, capacity, input.service_name, serviceForCap)
+        if (!slots.includes(input.time)) {
+          if (serviceWindowText(serviceForCap) && !applyServiceWindow([String(input.time).slice(0, 5)], serviceForCap).length) return { success: false, error: `${serviceForCap.name} ${serviceWindowText(serviceForCap)}. Please pick a time that works within that.` }
+          return { success: false, error: 'That slot is no longer available — all staff are booked at that time.' }
+        }
       } else if (input.time && serviceForCap?.booking_mode === 'class') {
         // For classes — check capacity not slot blocking
         const classCapacity = serviceForCap.class_capacity || 10

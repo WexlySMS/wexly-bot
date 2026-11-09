@@ -2,7 +2,30 @@
 // Each staff member has their own hours and service assignments
 // Slots are available when at least one qualified staff member is free
 
-function getAvailableSlots(business, date, existingAppts, serviceDuration = 60, blockedDates = [], serviceCapacity = 1, serviceName = null) {
+// v207: a service can carry its own booking window (services.earliest_start /
+// services.latest_start, "HH:MM"). "No color after 2pm" means the slot must
+// START by 14:00; closing time already stops it running past close. Applied as
+// a final filter so every path (staff-aware, hours-only, class) honours it,
+// and every caller that validates a requested time against these slots gets
+// it for free. Pass the service row as the 8th argument.
+function toMins(hhmm) { const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})/); return m ? (+m[1]) * 60 + (+m[2]) : null }
+function applyServiceWindow(slots, service) {
+  const lo = toMins(service?.earliest_start), hi = toMins(service?.latest_start)
+  if (lo == null && hi == null) return slots
+  return slots.filter(s => { const t = toMins(s); return (lo == null || t >= lo) && (hi == null || t <= hi) })
+}
+// "between 9:00am and 2:00pm" / "by 2:00pm" / "from 11:00am", for prompts and texts.
+function serviceWindowText(service) {
+  const lo = service?.earliest_start, hi = service?.latest_start
+  if (!lo && !hi) return ''
+  if (lo && hi) return `starts between ${formatTime(lo)} and ${formatTime(hi)}`
+  if (hi) return `must start by ${formatTime(hi)}`
+  return `starts from ${formatTime(lo)}`
+}
+function getAvailableSlots(business, date, existingAppts, serviceDuration = 60, blockedDates = [], serviceCapacity = 1, serviceName = null, service = null) {
+  return applyServiceWindow(getAvailableSlotsRaw(business, date, existingAppts, serviceDuration, blockedDates, serviceCapacity, serviceName), service)
+}
+function getAvailableSlotsRaw(business, date, existingAppts, serviceDuration = 60, blockedDates = [], serviceCapacity = 1, serviceName = null) {
   const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
   const dayOfWeek = dayNames[new Date(date + 'T12:00:00').getDay()]
   const dayShort = dayOfWeek.slice(0, 3) // Mon, Tue etc
@@ -235,4 +258,4 @@ function formatTime(timeStr) {
   return `${hour}:${String(m).padStart(2,'0')} ${period}`
 }
 
-module.exports = { getAvailableSlots, findAvailableStaff, formatDate, formatTime }
+module.exports = { getAvailableSlots, findAvailableStaff, formatDate, formatTime, applyServiceWindow, serviceWindowText }

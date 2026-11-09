@@ -2837,9 +2837,9 @@ app.get('/public/availability/:slug', async (req, res) => {
     }
 
     const { getAvailableSlots } = require('./src/utils/dateHelpers')
-    const slots = getAvailableSlots(biz, date, existing || [], duration, blocked || [], capacity, service_name)
+    const slots = getAvailableSlots(biz, date, existing || [], duration, blocked || [], capacity, service_name, service)
 
-    res.json({ slots, date, service: service?.name })
+    res.json({ slots, date, service: service?.name, window: service?.earliest_start || service?.latest_start ? { earliest_start: service.earliest_start || null, latest_start: service.latest_start || null } : null })
   } catch (err) {
     console.error('[Public Availability] Error:', err.message)
     res.status(500).json({ error: 'Server error' })
@@ -2902,9 +2902,11 @@ app.post('/public/book/:slug', async (req, res) => {
       .from('blocked_dates').select('*').eq('business_id', biz.id)
 
     const { getAvailableSlots, findAvailableStaff } = require('./src/utils/dateHelpers')
-    const slots = getAvailableSlots(biz, date, existing || [], service.duration_mins || 60, blocked || [], service.capacity || 1, service_name)
+    const slots = getAvailableSlots(biz, date, existing || [], service.duration_mins || 60, blocked || [], service.capacity || 1, service_name, service)
 
     if (!slots.includes(time)) {
+      const { serviceWindowText } = require('./src/utils/dateHelpers')
+      if (serviceWindowText(service)) return res.status(409).json({ error: `${service.name} ${serviceWindowText(service)}. Please choose another time.` })
       return res.status(409).json({ error: 'That time slot is no longer available' })
     }
 
@@ -3836,7 +3838,7 @@ app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════╗
   ║   Wexly SMS Bot v2.0                 ║
-  ║   BUILD: v206 (bring over bookings)  ║
+  ║   BUILD: v207 (guided setup, windows)║
   ║   Running on port ${PORT}               ║
   ║                                      ║
   ║   SMS:    POST /webhook/sms          ║
