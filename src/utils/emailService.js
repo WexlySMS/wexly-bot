@@ -160,7 +160,7 @@ ${EMAIL_FOOTER}
   })
 }
 
-async function sendEscalationNotification({ ownerEmail, ownerPhone, businessName, smsNumber, customerPhone, customerMessage, trigger }) {
+async function sendEscalationNotification({ ownerEmail, ownerPhone, businessName, smsNumber, customerPhone, customerMessage, trigger, tier = 'handoff', customerName = null }) {
   // Send email
   if (ownerEmail) {
     await sendEscalationEmail({
@@ -178,9 +178,15 @@ async function sendEscalationNotification({ ownerEmail, ownerPhone, businessName
     normalizedPhone = '+' + normalizedPhone
 
     const { sendSMS } = require('../utils/sms')
-    await sendSMS(smsNumber, normalizedPhone,
-      `⚠️ Customer needs attention!\nPhone: ${customerPhone}\nTrigger: "${trigger}"\nMessage: "${customerMessage?.slice(0, 100)}"\n\nText them or check your dashboard.`
-    ).catch(err => console.error('[Escalation] SMS failed:', err.message))
+    // v208: the text tells the owner what the bot is doing (stepping back vs
+    // carrying on) and how to hand the client back by replying here.
+    const who = customerName ? `${customerName} (${customerPhone})` : customerPhone
+    const body = tier === 'cancellation'
+      ? `❌ ${who}: ${customerMessage}. The slot is open again.`
+      : tier === 'handoff'
+      ? `⚠️ ${who} wants a person. They said: "${customerMessage?.slice(0, 120)}"\n\nI've stepped back on this thread for 2 hours so you can text them yourself. Reply "I've got them" if you want me to stay out longer, or "take ${customerName ? customerName.split(' ')[0] : 'them'} back" when I should handle them again.`
+      : `👀 Heads up from ${who}: "${customerMessage?.slice(0, 140)}"\n\nI'm still replying to them normally. Say "take over ${customerName ? customerName.split(' ')[0] : 'this client'}" if you'd rather handle it yourself.`
+    await sendSMS(smsNumber, normalizedPhone, body).catch(err => console.error('[Escalation] SMS failed:', err.message))
   }
 }
 

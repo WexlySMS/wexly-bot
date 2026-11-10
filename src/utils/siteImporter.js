@@ -495,4 +495,34 @@ async function applyImport(businessId, data, options = {}) {
   return result
 }
 
-module.exports = { importFromUrl, applyImport, normalizeUrl }
+// v208: photos of a service menu / price list (MMS). Same schema and cleaning
+// as a web page, read by vision. Twilio media is fetched with account auth.
+// Returns the same shape as importFromUrl ({ services, hours?, ... } or { error }).
+async function importFromImages(mediaUrls, { hint = '' } = {}) {
+  const { fetchImage } = require('./calendarImporter')
+  const images = []
+  for (const u of (mediaUrls || []).slice(0, 6)) { try { images.push(await fetchImage(u)) } catch (e) { console.error('[Import] menu image fetch failed:', e.message) } }
+  if (!images.length) return { error: 'Could not open the photos.' }
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+  try {
+    const resp = await client.messages.create({
+      model: MODEL, max_tokens: 6000,
+      system: `You read photos of a salon / barbershop / spa service menu or price list (printed menu, a screenshot of their booking app, a handwritten board, an Instagram highlight) and record every bookable service exactly as printed. Only include what is visible: never invent prices or durations. Prices like "$65+" are "65+". A line such as "Color 2hr $150" has duration 120 and price 150. Section headings are categories. Retail products, gift cards and tips are not services. If hours or a cancellation policy are printed, record them too.`,
+      tools: [TOOL], tool_choice: { type: 'tool', name: 'save_import' },
+      messages: [{ role: 'user', content: [
+        ...images.map(im => ({ type: 'image', source: { type: 'base64', media_type: im.type, data: im.data } })),
+        { type: 'text', text: `Record everything bookable on these ${images.length} photo(s).${hint ? ` The owner said: "${String(hint).slice(0, 200)}"` : ''}` }
+      ] }]
+    })
+    const call = resp.content.find(c => c.type === 'tool_use')
+    const data = clean(call ? call.input : {}, 'https://getwexly.com/')
+    delete data.logo; delete data.cover; data.photos = []   // photo URLs don't apply to an image import
+    if (!data.services.length) return { error: 'No services could be read from the photos.' }
+    return { source: 'photos', ...data, warnings: [] }
+  } catch (e) {
+    console.error('[Import] menu vision failed:', e.message)
+    return { error: `Could not read the photos: ${e.message}` }
+  }
+}
+
+module.exports = { importFromUrl, importFromImages, applyImport, normalizeUrl }

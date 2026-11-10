@@ -864,7 +864,7 @@ app.get('/admin/business/:id', async (req, res) => {
     const [services, faqs, sessions, appts] = await Promise.all([
       sb.from('services').select('id, name, price, duration_mins').eq('business_id', id).order('name'),
       sb.from('faqs').select('id, question, answer, sort_order').eq('business_id', id).order('sort_order'),
-      sb.from('conversation_sessions').select('customer_phone, messages, last_activity, manual_mode').eq('business_id', id).order('last_activity', { ascending: false }).limit(40),
+      sb.from('conversation_sessions').select('customer_phone, messages, last_activity, manual_mode').eq('business_id', id).not('customer_phone', 'like', 'owner:%').order('last_activity', { ascending: false }).limit(40),
       sb.from('appointments').select('id, customer_name, customer_phone, service_name, appointment_date, appointment_time, status, staff_name, created_at').eq('business_id', id).order('appointment_date', { ascending: false }).limit(25),
     ])
 
@@ -3834,11 +3834,24 @@ app.post('/setup-calls/book', async (req, res) => {
   }
 })
 
-app.listen(PORT, () => {
+// v208: finish in-flight client replies before Render's SIGTERM kills us on deploy.
+let shuttingDown = false
+async function shutdown(signal) {
+  if (shuttingDown) return; shuttingDown = true
+  console.log(`[Shutdown] ${signal} received; draining queued texts`)
+  try { await require('./src/routes/webhook').drainForShutdown(20000) } catch (e) { console.error('[Shutdown] drain failed:', e.message) }
+  try { await require('./src/bot/ownerCommands').persistOwnerSessions?.() } catch (e) { console.error('[Shutdown] owner session save failed:', e.message) }
+  try { server.close(() => process.exit(0)) } catch { process.exit(0) }
+  setTimeout(() => process.exit(0), 25000).unref()
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
+
+const server = app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════╗
   ║   Wexly SMS Bot v2.0                 ║
-  ║   BUILD: v207 (guided setup, windows)║
+  ║   BUILD: v208 (audit: no lost clients)║
   ║   Running on port ${PORT}               ║
   ║                                      ║
   ║   SMS:    POST /webhook/sms          ║

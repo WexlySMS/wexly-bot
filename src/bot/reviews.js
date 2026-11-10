@@ -51,6 +51,10 @@ async function sendReviewRequests() {
     const endEpoch = endLocal - offsetMs
     if (now - endEpoch < ASK_AFTER_MS) continue
     if (now - endEpoch > 36 * 60 * 60 * 1000) continue        // too old, don't nag days later
+    // v208: never ask late at night. Evening appointments wait for the morning
+    // (the 36h ceiling above still applies, so it still goes out next day).
+    const localHour = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hour12: false }).format(now)) % 24
+    if (localHour < 9 || localHour >= 20) continue
     const { data: existing, error: e2 } = await supabase.from('reviews').select('id').eq('appointment_id', a.id).maybeSingle()
     if (e2) { if (missingTable(e2)) return; continue }
     if (existing) continue

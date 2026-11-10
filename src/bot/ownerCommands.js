@@ -4,6 +4,8 @@ require('dotenv').config()
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
 const anthropic = new Anthropic()
+const { formatDate, formatTime } = require('../utils/dateHelpers')
+const db = require('../db/client')
 
 // ── Owner command tools ─────────────────────────────────────────────────────
 const OWNER_TOOLS = [
@@ -51,24 +53,29 @@ const OWNER_TOOLS = [
   },
   {
     name: 'cancel_appointment',
-    description: 'Cancel a specific appointment by customer name or date.',
+    description: 'Cancel a specific appointment by customer name or date. The client is texted that it was cancelled unless the owner says not to tell them (notify=false) or it was the client\'s own request already.',
     input_schema: {
       type: 'object',
       properties: {
         customer_name: { type: 'string', description: 'Customer name to find the appointment' },
-        date: { type: 'string', description: 'YYYY-MM-DD date of the appointment' }
+        date: { type: 'string', description: 'YYYY-MM-DD date of the appointment' },
+        reason: { type: 'string', description: 'Short reason to include in the text to the client, if the owner gave one' },
+        notify: { type: 'boolean', description: 'false = do not text the client. Default true.' }
       },
       required: []
     }
   },
   {
     name: 'reschedule_appointment',
-    description: 'Reschedule a customer\'s appointment. Cancels the existing appointment and texts the customer asking them to pick a new date and time. Use when owner says "reschedule Brandon\'s appointment", "move the 3pm to another day", "have them pick a new time".',
+    description: 'Move a client\'s appointment. If the owner gives the new day/time ("move Jess to Friday at 3", "push the 2pm to 2:30"), pass new_date/new_time: the slot is checked, the appointment is moved in place and the client is texted the new time. If no new time is given ("reschedule Brandon", "have them pick a new time"), the appointment is cancelled and the client is texted to choose a new time.',
     input_schema: {
       type: 'object',
       properties: {
         customer_name: { type: 'string', description: 'Customer name to find the appointment' },
         date: { type: 'string', description: 'YYYY-MM-DD date of the appointment to reschedule' },
+        new_date: { type: 'string', description: 'YYYY-MM-DD the owner wants it moved to (defaults to the same day if only a new time was given)' },
+        new_time: { type: 'string', description: 'HH:MM 24h the owner wants it moved to' },
+        force: { type: 'boolean', description: 'true = move even if the new slot is taken (owner said "book anyway")' },
         reason: { type: 'string', description: 'Brief reason for rescheduling (optional)' }
       },
       required: ['customer_name']
@@ -285,6 +292,82 @@ const OWNER_TOOLS = [
         payment_link: { type: 'string', description: 'The payment URL when method=link' }
       },
       required: ['method']
+    }
+  },
+  {
+    name: 'book_client',
+    description: 'Book an appointment for a client the owner is handling themselves (walk-in, phone call, DM, regular). Use for "book Jess for a balayage Thursday at 2", "put Marco down for a cut tomorrow 10am with Mia", "add Dana Friday 3pm color, her number is 310-555-1234". Checks the slot is free first. If the owner says "book anyway" / "double book" / "squeeze her in", pass force=true. Text the client a confirmation unless the owner says not to (notify=false). If the client\'s phone isn\'t given, look it up by name in their client list; if unknown, book without it and say reminders won\'t go out until a number is added.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        client_name: { type: 'string' },
+        client_phone: { type: 'string', description: 'If the owner gave one' },
+        service_name: { type: 'string', description: 'Match to one of their services; free text if none matches' },
+        date: { type: 'string', description: 'YYYY-MM-DD in the business timezone' },
+        time: { type: 'string', description: 'HH:MM 24h' },
+        duration_mins: { type: 'integer', description: 'Only if the owner said a length different from the service default' },
+        staff_name: { type: 'string', description: 'If the owner named who it\'s with' },
+        notes: { type: 'string' },
+        force: { type: 'boolean', description: 'true = book even if the slot is taken or outside hours (owner said "book anyway")' },
+        notify: { type: 'boolean', description: 'false = do not text the client a confirmation. Default true.' }
+      },
+      required: ['client_name', 'date', 'time']
+    }
+  },
+  {
+    name: 'set_hours',
+    description: 'Change the business\'s regular weekly hours by text: "change my hours to Tue to Sat 9 to 6", "we\'re closed Mondays now", "open until 8 on Thursdays", "Sunday 11 to 4". Pass the owner\'s words; the schedule is parsed and saved. For a one-off day off or vacation use block_dates instead.',
+    input_schema: { type: 'object', properties: { hours_text: { type: 'string', description: 'The owner\'s description of the new hours, verbatim' } }, required: ['hours_text'] }
+  },
+  {
+    name: 'add_staff',
+    description: 'Add one or more people who take appointments: "add Mia", "Jordan started, he does cuts and fades", "new stylist Priya, color and extensions". Optionally which services each one does.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        staff: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, services: { type: 'array', items: { type: 'string' }, description: 'Service names they do; empty = all' } }, required: ['name'] } }
+      },
+      required: ['staff']
+    }
+  },
+  {
+    name: 'message_client',
+    description: 'Text one client on the owner\'s behalf from the business number: "tell Jess I\'m running 10 minutes late", "text Marco to bring the reference photo", "let Dana know her color came in". Find the client by name (upcoming appointments first, then the client list) or by phone. The client\'s reply comes back to the bot, which will know the owner sent this.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        client_name: { type: 'string' },
+        client_phone: { type: 'string' },
+        message: { type: 'string', description: 'What to say, written as the business speaking to the client (first person is fine)' }
+      },
+      required: ['message']
+    }
+  },
+  {
+    name: 'client_handoff',
+    description: 'Who handles a client\'s texts: the owner or the bot. action=take_over when the owner says "I\'ve got Jess", "I\'ll handle Marco myself", "stay out of the Dana thread" (bot goes quiet on that client for `minutes`, default 120, 0 = until the owner hands back). action=give_back when the owner says "take Jess back", "you can handle Marco again", "bot back on for Dana". action=list when they ask "who am I handling right now" / "any flagged clients".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['take_over', 'give_back', 'list'] },
+        client_name: { type: 'string' },
+        client_phone: { type: 'string' },
+        minutes: { type: 'integer', description: 'take_over only. Default 120. 0 = indefinitely.' }
+      },
+      required: ['action']
+    }
+  },
+  {
+    name: 'set_policy',
+    description: 'Set or change the cancellation / late policy the bot quotes to clients and the booking page shows. "24 hour cancellation policy", "late cancels forfeit the deposit", "no-shows are charged 50%", "update my policy to: ...". cancel_window_hours is the notice period (24 for "24 hours"); policy_text is the wording clients see; late_cancel_note is the short consequence the bot adds when someone cancels inside the window.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cancel_window_hours: { type: 'integer', description: 'Hours of notice required; 0 clears the window' },
+        policy_text: { type: 'string', description: 'Full policy wording for the booking page (replaces the current text)' },
+        late_cancel_note: { type: 'string', description: 'e.g. "the deposit is kept" or "a 50% fee applies"' }
+      },
+      required: []
     }
   },
   {
@@ -534,7 +617,18 @@ async function executeOwnerTool(toolName, input, business) {
 
       const appt = appts[0]
       await supabase.from('appointments').update({ status: 'cancelled' }).eq('id', appt.id)
-      return `✅ Cancelled ${appt.customer_name}'s appointment on ${appt.appointment_date} at ${appt.appointment_time?.slice(0,5)}.`
+      // v208: the client hears about it too (unless the owner said not to).
+      let told = ''
+      if (input.notify !== false && appt.customer_phone && String(appt.customer_phone).replace(/\D/g, '').length >= 10 && business.sms_number) {
+        const { sendSMS } = require('../utils/sms')
+        const firstName = (appt.customer_name || '').split(' ')[0] || 'there'
+        const reason = input.reason ? ` (${String(input.reason).replace(/[.!]+$/, '')})` : ''
+        const r = await sendSMS(business.sms_number, appt.customer_phone, `Hi ${firstName}, this is ${business.business_name}. We've had to cancel your ${appt.service_name || 'appointment'} on ${formatDate(appt.appointment_date)} at ${formatTime(appt.appointment_time)}${reason}. So sorry about that. Text us back any time and we'll find you a new spot.`)
+        told = r?.success ? ' I let them know by text.' : r?.blocked ? ` I couldn't text them (they've opted out), so please reach them another way.` : ''
+        if (r?.success) await noteClientThread(business.id, appt.customer_phone, `[Cancelled by the owner] ${appt.service_name || 'Appointment'} on ${formatDate(appt.appointment_date)} at ${formatTime(appt.appointment_time)}${reason}. Client was told and invited to rebook.`)
+      } else if (input.notify === false) told = ' I did not text them.'
+      else if (!appt.customer_phone || String(appt.customer_phone).replace(/\D/g, '').length < 10) told = ' No phone on file for them, so nothing was sent.'
+      return `✅ Cancelled ${appt.customer_name}'s ${appt.service_name || 'appointment'} on ${formatDate(appt.appointment_date)} at ${formatTime(appt.appointment_time)}.${told}`
     }
 
     case 'reschedule_appointment': {
@@ -556,6 +650,26 @@ async function executeOwnerTool(toolName, input, business) {
       }
 
       const appt = appts[0]
+
+      // v208: owner gave the new time → move it in place (slot checked), tell the client.
+      if (input.new_time || input.new_date) {
+        const newDate = input.new_date || appt.appointment_date
+        const newTime = String(input.new_time || appt.appointment_time).slice(0, 5)
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(newDate) || !/^\d{1,2}:\d{2}$/.test(newTime)) return `I need the new day and time, like "move Jess to Friday at 3pm".`
+        const avail = await ownerSlotCheck(business, newDate, newTime, appt.service_name, appt.duration_mins, appt.staff_name, appt.id)
+        if (!avail.ok && !input.force) return `${newTime === String(appt.appointment_time).slice(0, 5) && newDate === appt.appointment_date ? 'That\'s already their time.' : avail.reason} ${avail.alternatives ? `Open that day: ${avail.alternatives}. ` : ''}Say "move them anyway" if you want it there regardless.`
+        await supabase.from('appointments').update({ appointment_date: newDate, appointment_time: newTime, updated_at: new Date().toISOString() }).eq('id', appt.id)
+        let told = ''
+        if (appt.customer_phone && String(appt.customer_phone).replace(/\D/g, '').length >= 10 && business.sms_number) {
+          const { sendSMS } = require('../utils/sms')
+          const firstName = (appt.customer_name || '').split(' ')[0] || 'there'
+          const reason = input.reason ? ` (${String(input.reason).replace(/[.!]+$/, '')})` : ''
+          const r = await sendSMS(business.sms_number, appt.customer_phone, `Hi ${firstName}, this is ${business.business_name}. We've moved your ${appt.service_name || 'appointment'} to ${formatDate(newDate)} at ${formatTime(newTime)}${reason}. Reply YES if that works, or text us a time that suits you better.`)
+          told = r?.success ? ' I texted them the new time and asked them to confirm.' : ' I couldn\'t text them, so please let them know.'
+          if (r?.success) await noteClientThread(business.id, appt.customer_phone, `[Moved by the owner] ${appt.service_name || 'Appointment'} is now ${formatDate(newDate)} at ${formatTime(newTime)}${reason}. Client was asked to reply YES to confirm or suggest another time. A plain YES means they accept; no booking action is needed.`)
+        } else told = ' No phone on file, so please let them know.'
+        return `✅ Moved ${appt.customer_name}'s ${appt.service_name || 'appointment'} to ${formatDate(newDate)} at ${formatTime(newTime)}.${told}${avail.ok ? '' : ' (Booked over a conflict as you asked.)'}`
+      }
 
       // Cancel the old appointment
       await supabase.from('appointments').update({ status: 'cancelled' }).eq('id', appt.id)
@@ -1133,6 +1247,27 @@ async function executeOwnerTool(toolName, input, business) {
       return `Payment link removed.` + (business.stripe_account_connected ? ` Deposits still run through Stripe.` : ` Deposits are off until you connect Stripe or give me a new link.`)
     }
 
+    case 'set_policy': {
+      const patch = {}, ps = { ...(business.pro_settings || {}) }
+      if (Number.isInteger(input.cancel_window_hours)) { if (input.cancel_window_hours > 0) ps.cancel_window_hours = input.cancel_window_hours; else delete ps.cancel_window_hours }
+      if (typeof input.late_cancel_note === 'string') { const n = input.late_cancel_note.trim().replace(/[.!]+$/, ''); if (n) ps.late_cancel_note = n.slice(0, 160); else delete ps.late_cancel_note }
+      patch.pro_settings = ps
+      if (typeof input.policy_text === 'string' && input.policy_text.trim()) patch.profile_policies = input.policy_text.trim().slice(0, 1500)
+      else if (Number.isInteger(input.cancel_window_hours) && !business.profile_policies) patch.profile_policies = input.cancel_window_hours > 0 ? `Please give at least ${input.cancel_window_hours} hours' notice to cancel or reschedule${ps.late_cancel_note ? `; otherwise ${ps.late_cancel_note}` : ''}.` : null
+      const { error } = await supabase.from('businesses').update(patch).eq('id', business.id)
+      if (error) return `I couldn't save that. Try again in a moment.`
+      const bits = []
+      if (ps.cancel_window_hours) bits.push(`${ps.cancel_window_hours}-hour cancellation window`); else if (Number.isInteger(input.cancel_window_hours)) bits.push('no cancellation window')
+      if (ps.late_cancel_note) bits.push(`late cancels: ${ps.late_cancel_note}`)
+      if (patch.profile_policies) bits.push('policy text updated on your booking page')
+      return `Done. ${bits.join(', ')}. I'll quote it when clients ask and flag you on late cancels.`
+    }
+    case 'book_client': return await handleBookClient(business, input)
+    case 'set_hours': return await handleSetHours(business, input)
+    case 'add_staff': return await handleAddStaff(business, input)
+    case 'message_client': return await handleMessageClient(business, input)
+    case 'client_handoff': return await handleClientHandoff(business, input)
+
     case 'import_appointments': {
       const Cal = require('../utils/calendarImporter')
       const { handleCalendarInput } = require('./trialOnboarding')
@@ -1224,6 +1359,177 @@ async function executeOwnerTool(toolName, input, business) {
     default:
       return `Unknown command.`
   }
+}
+
+// ── v208: owner-side booking, hours, staff, messaging, handoff ───────────────
+const digits10 = (p) => { let d = String(p || '').replace(/\D/g, ''); if (d.length === 11 && d.startsWith('1')) d = d.slice(1); return d.length === 10 ? '+1' + d : null }
+const hasRealPhone = (p) => String(p || '').replace(/\D/g, '').length >= 10
+// Leave a note in the client's thread so the bot understands their next reply
+// ("YES" to a moved time, a question about the owner's message, etc.).
+async function noteClientThread(businessId, phone, text) {
+  if (!hasRealPhone(phone)) return
+  try {
+    const { data: sess } = await supabase.from('conversation_sessions').select('messages').eq('business_id', businessId).eq('customer_phone', phone).maybeSingle()
+    const msgs = Array.isArray(sess?.messages) ? sess.messages : []
+    msgs.push({ role: 'assistant', content: text, timestamp: new Date().toISOString() })
+    await supabase.from('conversation_sessions').upsert({ business_id: businessId, customer_phone: phone, messages: msgs.slice(-60), last_activity: new Date().toISOString() }, { onConflict: 'business_id,customer_phone' })
+  } catch (e) { console.error('[Owner] thread note failed:', e.message) }
+}
+
+// Find a client by name (upcoming appointments first, then the client list) or phone.
+async function findClient(business, { name, phone }) {
+  const e164 = digits10(phone)
+  if (e164) {
+    const { data: c } = await supabase.from('customers').select('name, phone').eq('business_id', business.id).eq('phone', e164).maybeSingle()
+    return { name: c?.name || name || null, phone: e164 }
+  }
+  const n = String(name || '').trim(); if (!n) return null
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: business.timezone || 'America/New_York' })
+  const { data: appts } = await supabase.from('appointments').select('customer_name, customer_phone, appointment_date, appointment_time, service_name, id').eq('business_id', business.id).ilike('customer_name', `%${n}%`).neq('status', 'cancelled').gte('appointment_date', today).order('appointment_date').limit(5)
+  const real = (appts || []).filter(a => hasRealPhone(a.customer_phone))
+  if (real.length) {
+    const phones = [...new Set(real.map(a => a.customer_phone))]
+    if (phones.length > 1) return { ambiguous: real.map(a => `${a.customer_name} (${a.appointment_date})`) }
+    return { name: real[0].customer_name, phone: real[0].customer_phone, appt: real[0] }
+  }
+  const { data: custs } = await supabase.from('customers').select('name, phone').eq('business_id', business.id).ilike('name', `%${n}%`).limit(5)
+  const cs = (custs || []).filter(c => hasRealPhone(c.phone))
+  if (cs.length === 1) return { name: cs[0].name, phone: cs[0].phone }
+  if (cs.length > 1) {
+    const exact = cs.find(c => c.name.toLowerCase() === n.toLowerCase()); if (exact) return { name: exact.name, phone: exact.phone }
+    return { ambiguous: cs.map(c => c.name) }
+  }
+  if (appts?.length) return { name: appts[0].customer_name, phone: null, appt: appts[0] } // known, no number
+  return null
+}
+
+// Is this slot open? Mirrors what clients are offered (hours, buffers, staff,
+// blocked dates, service windows). `ignoreApptId` lets a move skip itself.
+async function ownerSlotCheck(business, date, time, serviceName, durationMins, staffName, ignoreApptId = null) {
+  const { getAvailableSlots } = require('../utils/dateHelpers')
+  const profile = await db.getBusinessProfile(business.id)
+  const service = serviceName ? profile.services.find(sv => sv.name.toLowerCase() === String(serviceName).toLowerCase()) || profile.services.find(sv => sv.name.toLowerCase().includes(String(serviceName).toLowerCase()) || String(serviceName).toLowerCase().includes(sv.name.toLowerCase())) : null
+  const duration = durationMins || service?.duration_mins || 60
+  let existing = await db.getAppointmentsByDate(business.id, date)
+  if (ignoreApptId) existing = existing.filter(a => a.id !== ignoreApptId)
+  const capacity = service?.capacity || 1
+  const slots = getAvailableSlots(business, date, existing, duration, profile.blockedDates, capacity, service?.name || serviceName || null, service)
+  const t = String(time).slice(0, 5).padStart(5, '0')
+  if (slots.includes(t)) return { ok: true, service, duration }
+  const alts = slots.slice(0, 6).map(formatTime).join(', ')
+  const svcLabel = service?.name || serviceName || 'that'
+  const dur = duration % 60 === 0 ? `${duration / 60}-hour` : duration > 60 ? `${Math.floor(duration / 60)} hr ${duration % 60} min` : `${duration}-minute`
+  let reason = `${formatTime(t)} on ${formatDate(date)} isn't open for a ${dur} ${svcLabel}`
+  if (!slots.length) reason = existing.length ? `There's no ${dur} gap left on ${formatDate(date)} for ${svcLabel}` : `You're closed on ${formatDate(date)}`
+  return { ok: false, reason: reason + '.', alternatives: alts || null, service, duration }
+}
+
+async function handleBookClient(business, input) {
+  const { sendSMS } = require('../utils/sms')
+  const date = String(input.date || ''), time = String(input.time || '').slice(0, 5).padStart(5, '0')
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) return `I need the day and time, like "book Jess Thursday at 2pm for a balayage".`
+  const name = String(input.client_name || '').trim()
+  if (!name) return `Who is it for?`
+  // Phone: given → use it; else look the name up in their clients.
+  let phone = digits10(input.client_phone)
+  if (!phone) { const f = await findClient(business, { name }); if (f?.ambiguous) return `I know a few clients like that: ${f.ambiguous.join(', ')}. Which one, or what's their number?`; if (f?.phone) phone = f.phone }
+  const check = await ownerSlotCheck(business, date, time, input.service_name, input.duration_mins, input.staff_name)
+  if (!check.ok && !input.force) return `${check.reason} ${check.alternatives ? `Open that day: ${check.alternatives}. Want one of those, or` : 'Pick another day, or'} say "book anyway" and I'll put ${name.split(' ')[0]} there regardless.`
+  const svc = check.service
+  const staff = input.staff_name ? (business.staff_members || []).find(st => st?.name && st.name.toLowerCase().includes(String(input.staff_name).toLowerCase())) : null
+  const row = {
+    business_id: business.id,
+    customer_name: name.slice(0, 120),
+    customer_phone: phone || ('nophone-' + require('crypto').createHash('md5').update(name.toLowerCase()).digest('hex').replace(/[0-9]/g, 'x').slice(0, 12)),
+    service_id: svc?.id || null,
+    service_name: svc?.name || String(input.service_name || 'Appointment').slice(0, 120),
+    appointment_date: date, appointment_time: time, duration_mins: check.duration,
+    status: 'confirmed',
+    staff_id: staff?.id || null, staff_name: staff?.name || null,
+    notes: ['Booked by owner by text', input.notes].filter(Boolean).join('. ')
+  }
+  let appt
+  try { appt = await db.createAppointment(row) } catch (e) { console.error('[Owner] book_client failed:', e.message); return `I couldn't save that booking. Try again in a moment.` }
+  if (phone) await supabase.from('customers').upsert({ business_id: business.id, name: row.customer_name, phone, source: 'owner' }, { onConflict: 'business_id,phone', ignoreDuplicates: true })
+  let told = ''
+  if (phone && input.notify !== false && business.sms_number) {
+    const first = name.split(' ')[0]
+    const r = await sendSMS(business.sms_number, phone, `Hi ${first}! ${business.business_name} has you booked for ${row.service_name} on ${formatDate(date)} at ${formatTime(time)}${staff ? ` with ${staff.name}` : ''}. Reply here if anything needs to change. See you then!`)
+    told = r?.success ? ` I texted ${first} the confirmation.` : r?.blocked ? ` ${first} has opted out of texts, so no confirmation went out.` : ''
+    if (r?.success) await noteClientThread(business.id, phone, `[Booked by the owner] ${row.service_name} on ${formatDate(date)} at ${formatTime(time)}${staff ? ` with ${staff.name}` : ''}. Confirmation texted to the client.`)
+  } else if (!phone) told = ` No number on file for ${name.split(' ')[0]}, so no confirmation or reminders until you give me one (like "${name.split(' ')[0]} is 310-555-1234").`
+  else if (input.notify === false) told = ' No text sent, as you asked.'
+  return `✅ Booked ${name}: ${row.service_name}, ${formatDate(date)} at ${formatTime(time)}${staff ? ` with ${staff.name}` : ''}${check.ok ? '' : ' (over a conflict, as you asked)'}.${told}`
+}
+
+async function handleSetHours(business, input) {
+  const { parseHours, describeHours } = require('./trialOnboarding')
+  const current = Array.isArray(business.hours) && business.hours.length === 7 ? business.hours : null
+  let week = null
+  try { week = await parseHours(String(input.hours_text || ''), current) } catch (e) { console.error('[Owner] set_hours parse failed:', e.message) }
+  if (!week) return `I couldn't make out the hours. Try it like "Tue to Sat 9 to 6, closed Sun and Mon".`
+  const { error } = await supabase.from('businesses').update({ hours: week }).eq('id', business.id)
+  if (error) return `I couldn't save those hours. Try again in a moment.`
+  return `Done. Hours are now: ${describeHours(week)}. Closed the other days.`
+}
+
+async function handleAddStaff(business, input) {
+  const list = Array.isArray(input.staff) ? input.staff.filter(x => x && x.name) : []
+  if (!list.length) return `Who should I add?`
+  const current = Array.isArray(business.staff_members) ? business.staff_members.slice() : []
+  const { data: svcRows } = await supabase.from('services').select('id, name').eq('business_id', business.id).neq('active', false)
+  const added = [], existing = []
+  for (const st of list) {
+    const name = String(st.name).trim().slice(0, 60)
+    if (current.some(c => c?.name && c.name.toLowerCase() === name.toLowerCase())) { existing.push(name); continue }
+    const svcNames = (st.services || []).map(x => (svcRows || []).find(sv => sv.name.toLowerCase().includes(String(x).toLowerCase()))?.name).filter(Boolean)
+    current.push({ id: require('crypto').randomUUID(), name, services: svcNames })
+    added.push(svcNames.length ? `${name} (${svcNames.join(', ')})` : name)
+  }
+  if (added.length) {
+    const { error } = await supabase.from('businesses').update({ staff_members: current }).eq('id', business.id)
+    if (error) return `I couldn't save that. Try again in a moment.`
+  }
+  let msg = added.length ? `Added ${added.join(', ')}. Clients can now ask to book with them.` : ''
+  if (existing.length) msg += ` ${existing.join(', ')} ${existing.length === 1 ? 'was' : 'were'} already on the list.`
+  if (String(business.plan || '').toLowerCase() === 'solo' && current.length > 1) msg += ` One thing: your Solo plan is built for one provider. Staff bookings work, but to keep everything in step upgrade to Standard in the app under Billing when you get a chance.`
+  return msg.trim()
+}
+
+async function handleMessageClient(business, input) {
+  const { sendSMS } = require('../utils/sms')
+  const text = String(input.message || '').trim()
+  if (!text) return `What should I tell them?`
+  const f = await findClient(business, { name: input.client_name, phone: input.client_phone })
+  if (!f) return `I don't have a client called ${input.client_name || 'that'}. What's their number?`
+  if (f.ambiguous) return `A few clients match: ${f.ambiguous.join(', ')}. Which one?`
+  if (!f.phone) return `I have ${f.name} on the books but no phone number. Give me their number and I'll send it.`
+  const first = (f.name || '').split(' ')[0]
+  const body = /^(hi|hey|hello)\b/i.test(text) ? text : `Hi${first ? ' ' + first : ''}, message from ${business.business_name}: ${text}`
+  const r = await sendSMS(business.sms_number, f.phone, body)
+  if (!r?.success) return r?.blocked ? `${first || 'They'} opted out of texts, so I can't send that. You'd have to call.` : `The text didn't go through. Try again in a moment.`
+  await noteClientThread(business.id, f.phone, `[Sent on behalf of ${business.owner_name || 'the owner'}] ${body}`)
+  return `Sent to ${f.name || f.phone}: "${body}"`
+}
+
+async function handleClientHandoff(business, input) {
+  if (input.action === 'list') {
+    const { data: rows } = await supabase.from('conversation_sessions').select('customer_phone, manual_mode_until, attention_reason, needs_attention').eq('business_id', business.id).or('manual_mode.eq.true,needs_attention.eq.true').order('last_activity', { ascending: false }).limit(10)
+    if (!rows?.length) return `Nobody's flagged. I'm handling every thread.`
+    const names = await Promise.all(rows.map(async r => { const c = await findClient(business, { phone: r.customer_phone }); return `${c?.name || r.customer_phone}${r.manual_mode_until ? ` (yours until ${new Date(r.manual_mode_until).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: business.timezone || 'America/New_York' })})` : r.needs_attention ? ' (flagged)' : ' (yours)'}` }))
+    return `Threads you're on or that are flagged: ${names.join('; ')}. Say "take Jess back" to hand one to me.`
+  }
+  const f = await findClient(business, { name: input.client_name, phone: input.client_phone })
+  if (!f || !f.phone) return `Which client? Give me a name I have on the books or their number.`
+  if (f.ambiguous) return `A few clients match: ${f.ambiguous.join(', ')}. Which one?`
+  const first = (f.name || f.phone).split(' ')[0]
+  if (input.action === 'take_over') {
+    const mins = Number.isInteger(input.minutes) ? input.minutes : 120
+    await db.setManualMode(business.id, f.phone, true, mins)
+    return mins ? `Got it. I'll stay out of ${first}'s thread for ${mins >= 60 ? `${Math.round(mins / 60)} hour${mins >= 120 ? 's' : ''}` : `${mins} minutes`}, then pick back up. Say "take ${first} back" any time sooner.` : `Got it. ${first}'s thread is yours until you say "take ${first} back".`
+  }
+  await db.setManualMode(business.id, f.phone, false)
+  return `I've got ${first} again.`
 }
 
 // ── Staff management helpers ────────────────────────────────────────────────
@@ -1383,6 +1689,39 @@ function getOwnerSession(businessId) {
   return session
 }
 
+// v208: the owner's thread used to live only in this Map, so every deploy made
+// the bot forget what "the one tomorrow" referred to. It now round-trips
+// through conversation_sessions under a reserved phone key ("owner:<bizId>")
+// that the dashboard and admin lists filter out. Loaded once per process,
+// saved after every owner turn.
+const OWNER_KEY = (businessId) => `owner:${businessId}`
+async function loadOwnerSession(businessId) {
+  const session = getOwnerSession(businessId)
+  if (session.loaded) return session
+  session.loaded = true
+  try {
+    const { data } = await supabase.from('conversation_sessions').select('messages, session_state').eq('business_id', businessId).eq('customer_phone', OWNER_KEY(businessId)).maybeSingle()
+    if (data && Array.isArray(data.messages) && data.messages.length && !session.messages.length) {
+      session.messages = data.messages
+      if (data.session_state?.lastMedia) session.lastMedia = data.session_state.lastMedia
+      trimSessionSafely(session)
+    }
+  } catch (e) { console.error('[Owner] session load failed:', e.message) }
+  return session
+}
+async function persistOwnerSession(businessId) {
+  const session = ownerSessions.get(businessId)
+  if (!session) return
+  try {
+    await supabase.from('conversation_sessions').upsert({
+      business_id: businessId, customer_phone: OWNER_KEY(businessId),
+      messages: session.messages.slice(-30), session_state: { kind: 'owner', lastMedia: session.lastMedia || null },
+      last_activity: new Date().toISOString()
+    }, { onConflict: 'business_id,customer_phone' })
+  } catch (e) { console.error('[Owner] session save failed:', e.message) }
+}
+async function persistOwnerSessions() { await Promise.allSettled([...ownerSessions.keys()].map(persistOwnerSession)) }
+
 // v204: when the bot texts the owner on its own (import summary, a question),
 // record it here so a follow-up like "yes" or "make Balayage $240" lands with
 // the model knowing what was just said. Stored as a bracketed user-role note:
@@ -1390,6 +1729,7 @@ function getOwnerSession(businessId) {
 function noteOwnerOutbound(businessId, text) {
   const session = getOwnerSession(businessId)
   session.messages.push({ role: 'user', content: `[Context: Wexly just texted the owner this message, so their next reply is probably about it: "${String(text).slice(0, 600)}"]` })
+  persistOwnerSession(businessId).catch(() => {})
 }
 
 // Trim history WITHOUT breaking tool_use/tool_result pairing. Naive slice(-10)
@@ -1413,13 +1753,17 @@ function trimSessionSafely(session, max = 10) {
 
 // ── Main owner message handler ──────────────────────────────────────────────
 async function handleOwnerMessage(business, incomingText, mediaUrls = []) {
+  try { return await handleOwnerMessageInner(business, incomingText, mediaUrls) }
+  finally { persistOwnerSession(business.id).catch(() => {}) }
+}
+async function handleOwnerMessageInner(business, incomingText, mediaUrls = []) {
   console.log(`[Owner] Command from owner of ${business.business_name}: "${incomingText}"${mediaUrls?.length ? ` (+${mediaUrls.length} photo(s))` : ''}`)
 
   const tz = business.timezone || 'America/New_York'
   const today = new Date().toLocaleDateString('en-CA', { timeZone: tz })
   const todayFull = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: tz })
 
-  const session = getOwnerSession(business.id)
+  const session = await loadOwnerSession(business.id)
   // v206: photos aren't shown to this model; it just needs to know they're
   // there so it can call import_appointments(source=photos). The URLs are kept
   // on the session for that tool.
@@ -1455,6 +1799,12 @@ You can help them:
 - Send quotes
 - Add services with duration and price — "Haircut 45 min $60, Color 2 hr $150"
 - Set, list and cancel reminders — "Remind me tomorrow at 9 to call the supplier" (business timezone: ${tz})
+- Book a client themselves (book_client): "book Jess Thursday 2pm balayage", walk-ins, phone calls. The slot is checked; "book anyway" forces it.
+- Move or cancel a client's appointment (reschedule_appointment with new_date/new_time moves it in place and texts the client; cancel_appointment texts the client too)
+- Change weekly hours by text (set_hours), add staff (add_staff), remove staff (remove_staff)
+- Text one client on their behalf (message_client): "tell Jess I'm running 10 late"
+- Set the cancellation / late policy (set_policy): "24 hour cancellation policy, late cancels lose the deposit"
+- Take over a client's thread or hand it back (client_handoff): "I've got Jess" / "take Jess back" / "who am I handling"
 - Bring over appointments from their old booking app — calendar link or screenshots (import_appointments), keep that calendar syncing or stop it (calendar_sync), add a phone number to an imported client (attach_client_phone)
 
 FACTS YOU MAY NEED:
@@ -1467,7 +1817,9 @@ RULES:
 - Remember context from earlier messages in this conversation. If the owner said "check my schedule" and then says "cancel the 3pm", you know which appointment they mean.
 - If the request is unclear, ask ONE clarifying question.
 - Confirm all destructive actions before executing.
-- NEVER agree to do something you have no tool for (emailing, calling, posting online, editing hours or prices, anything not listed). Say plainly that you can't do that yet by text and point them to the dashboard. Only say "I'll remind you" after the set_reminder tool has run.`,
+- NEVER agree to do something you have no tool for (emailing, calling, posting online, anything not listed). Say plainly that you can't do that yet by text and point them to the dashboard. Only say "I'll remind you" after the set_reminder tool has run.
+- When a request names a client and a day/time, that's a booking: call book_client. Don't ask for the phone number first; the tool looks it up and says if it's missing.
+- Dates: resolve "Thursday", "tomorrow", "the 14th" to YYYY-MM-DD using today's date above. Times to 24h HH:MM. If the owner gives a time with no date, assume the next occurrence (today if still ahead, else tomorrow).`,
       messages: session.messages
     })
 
@@ -1569,6 +1921,9 @@ function getOwnerWelcome(business) {
 • Deposit alerts — "Confirm Sarah" or "Cancel Sarah"
 • Approve/deny requests — "Approve John" or "Deny Lisa"
 • Add services — "Haircut 45 min $60, Color 2 hr $150"
+• Book a client — "Book Jess Thursday 2pm for a balayage"
+• Text a client — "Tell Jess I'm running 10 min late"
+• Change hours or staff — "Closed Mondays now", "Add Mia"
 • Bring over your bookings — text me your calendar link or screenshots
 • Reminders — "Remind me tomorrow at 9 to order color"
 • See the client experience — "DEMO"
@@ -1577,4 +1932,4 @@ function getOwnerWelcome(business) {
 Just text me what you need!`
 }
 
-module.exports = { handleOwnerMessage, getOwnerWelcome, noteOwnerOutbound }
+module.exports = { handleOwnerMessage, getOwnerWelcome, noteOwnerOutbound, executeOwnerTool, persistOwnerSessions }

@@ -881,7 +881,7 @@ async function setFeedActive(businessId, active) {
 module.exports = {
   extractCalendarUrl, platformFromUrl, PLATFORM, bookingsQuestion,
   importFromCalendarLink, importFromScreenshots, syncCalendarFeeds, setFeedActive, matchPlaceholderPhones,
-  parseNamePhonePairs, attachClientPhone, listNoPhone, importSummary,
+  parseNamePhonePairs, attachClientPhone, listNoPhone, importSummary, fetchImage,
   // exported for tests
   parseIcs, normalizeCalendarUrl, SYNC_DAYS, IMPORT_NOTE, _resetUidCache: () => { uidSupport = { ok: null, at: 0 } }
 }

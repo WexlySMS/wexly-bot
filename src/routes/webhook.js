@@ -38,6 +38,79 @@ const DEBOUNCE_MS = 5000      // 5s — long enough to catch rapid texters
 const DEBOUNCE_MAX_MS = 15000 // 15s — cap so chatty customers eventually get a reply
 const pendingMessages = new Map() // key: `${business_id}|${customer_phone}` → {texts, mediaUrls, timer, firstQueuedAt, toNumber}
 
+// v208: is this phone the owner (or an additional owner) of this business?
+function ownerPhoneMatch(biz, phone) {
+  const sender = String(phone || '').replace(/\D/g, '')
+  if (!sender) return false
+  return [biz?.owner_phone, ...(biz?.additional_owner_phones || [])].filter(Boolean).some(p => {
+    const d = String(p).replace(/\D/g, '')
+    return d && (d === sender || d === sender.replace(/^1/, '') || ('1' + d) === sender)
+  })
+}
+
+// v208: a client texted exactly "CANCEL". Cancel their soonest upcoming
+// appointment, tell the owner, confirm to the client (or record the carrier
+// opt-out if the confirmation is blocked). Returns true when an appointment
+// was found and handled; false → caller treats CANCEL as a plain opt-out.
+async function cancelByKeyword(biz, customerPhone) {
+  const sb = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+  const tz = biz.timezone || 'America/Los_Angeles'
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: tz })
+  const { data: appt } = await sb.from('appointments').select('*').eq('business_id', biz.id).eq('customer_phone', customerPhone)
+    .in('status', ['confirmed', 'pending', 'deposit_pending', 'pending_approval']).gte('appointment_date', today)
+    .order('appointment_date', { ascending: true }).order('appointment_time', { ascending: true }).limit(1).maybeSingle()
+  if (!appt) return false
+  const { formatDate, formatTime } = require('../utils/dateHelpers')
+  const { error } = await sb.from('appointments').update({ status: 'cancelled', notes: [appt.notes, 'Cancelled by client (texted CANCEL)'].filter(Boolean).join('. ') }).eq('id', appt.id)
+  if (error) { console.error('[CANCEL] update failed:', error.message); return false }
+  const when = `${formatDate(appt.appointment_date)} at ${formatTime(appt.appointment_time)}`
+  const first = (appt.customer_name || 'A client').split(' ')[0]
+  // Confirm to the client. If the carrier already treated CANCEL as STOP, this
+  // fails with 21610 and the client is unreachable until they text START.
+  const r = await sendSMS(biz.sms_number, customerPhone, `Got it, your ${appt.service_name || 'appointment'} on ${when} is cancelled. Text us any time to rebook.`)
+  let ownerNote = `${appt.customer_name || customerPhone} cancelled their ${appt.service_name || 'appointment'} on ${when} (texted CANCEL).`
+  if (r && r.blocked) {
+    await sb.from('customers').update({ fully_opted_out: true, opted_out: true }).eq('business_id', biz.id).eq('phone', customerPhone)
+    ownerNote += ` Heads up: their carrier treated CANCEL as unsubscribe, so I can't text ${first} until they reply START. If you need to reach them, call or text from your own phone.`
+  }
+  if (biz.owner_phone) await sendSMS(biz.sms_number, biz.owner_phone, ownerNote).catch(() => {})
+  try { require('../utils/push').pushCancellation(biz, { customerName: appt.customer_name || '', customerPhone, serviceName: appt.service_name || 'Appointment', appointmentDate: appt.appointment_date, appointmentTime: appt.appointment_time }).catch(() => {}) } catch (e) {}
+  // Open the slot to anyone waiting on it, same as a conversational cancel.
+  try {
+    const waiters = await db.getWaitlistForSlot(biz.id, appt.appointment_date, appt.appointment_time)
+    if (waiters.length) {
+      await sb.from('waitlist').update({ slot_held_until: new Date(Date.now() + 30 * 60000).toISOString() }).eq('id', waiters[0].id)
+      await sendSMS(biz.sms_number, waiters[0].customer_phone, `Great news! A spot just opened up at ${biz.business_name} on ${when}. We're holding it for you for 30 minutes, just text back to claim it! 🎉`).catch(() => {})
+    }
+  } catch (e) { console.error('[CANCEL] waitlist notify failed:', e.message) }
+  console.log(`[CANCEL] ${customerPhone} cancelled appt ${appt.id} for ${biz.business_name}${r?.blocked ? ' (carrier opt-out recorded)' : ''}`)
+  return true
+}
+
+// v208: a client texted a business whose bot is paused for billing reasons
+// (trial over, card failed, checkout never finished). Instead of silence, one
+// short pointer to the business's own phone per client per day, and one
+// heads-up to the owner per day so they know clients are bouncing.
+const pausedReplies = new Map() // `${bizId}|${phone}` → ts
+const pausedOwnerAlerts = new Map() // bizId → ts
+async function pausedClientReply(biz, customerPhone, toNumber) {
+  const DAY = 24 * 60 * 60 * 1000
+  const k = `${biz.id}|${customerPhone}`
+  if (Date.now() - (pausedReplies.get(k) || 0) < DAY) return
+  pausedReplies.set(k, Date.now())
+  const contact = biz.existing_phone || biz.phone
+  const formatPhone = (p) => { const d = String(p || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(p) }
+  const msg = contact
+    ? `Thanks for reaching out to ${biz.business_name}! Booking by text is paused right now. Please call or text ${formatPhone(contact)} to book, and we'll be back here soon.`
+    : `Thanks for reaching out to ${biz.business_name}! Booking by text is paused right now. Please reach the salon directly to book, and we'll be back here soon.`
+  await sendSMS(toNumber, customerPhone, msg).catch(() => {})
+  if (biz.owner_phone && Date.now() - (pausedOwnerAlerts.get(biz.id) || 0) >= DAY) {
+    pausedOwnerAlerts.set(biz.id, Date.now())
+    const why = biz.status === 'past_due' ? 'your card payment didn\'t go through' : biz.status === 'trial_expired' ? 'your trial ended' : 'checkout wasn\'t finished'
+    await sendSMS(toNumber, biz.owner_phone, `A client just texted ${biz.business_name} but I'm paused because ${why}. I told them to call you directly. Fix it in the app under Billing and I'll pick right back up: ${process.env.SITE_URL || 'https://getwexly.com'}/dashboard.html`).catch(() => {})
+  }
+}
+
 function debouncedProcess(business, customerPhone, toNumber, incomingText, mediaUrls) {
   const key = `${business.id}|${customerPhone}`
   const existing = pendingMessages.get(key)
@@ -85,7 +158,7 @@ function cancelDebounced(businessId, customerPhone) {
   }
 }
 
-async function flushDebounced(key) {
+let flushDebounced = async function (key) {
   const entry = pendingMessages.get(key)
   if (!entry) return
   pendingMessages.delete(key) // remove first so new texts arriving DURING processing start a fresh queue
@@ -215,8 +288,25 @@ router.post('/sms', validateTwilio, async (req, res) => {
 
   // ── STOP / START handling ───────────────────────────────────────────────
   const upperText = incomingText.trim().toUpperCase()
-  if (['STOP', 'STOPALL', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT'].includes(upperText)) {
-    const biz = await db.getBusinessBySmsNumber(toNumber)
+  // v208: the owner's own phone is never opted out or given the generic HELP
+  // card by these keyword shortcuts; their texts go to the owner flow below.
+  const kwBiz = ['STOP', 'STOPALL', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT', 'HELP', 'START', 'UNSTOP'].includes(upperText) ? await db.getBusinessBySmsNumber(toNumber, { includePaused: true }) : null
+  const kwOwner = !!(kwBiz && ownerPhoneMatch(kwBiz, customerPhone))
+
+  // v208: a client texting the single word CANCEL almost always means their
+  // appointment, not the subscription. If they have one coming up, cancel it,
+  // tell the owner, and try to confirm back. Carriers also read CANCEL as
+  // opt-out, so if the confirmation is blocked (21610) we record the opt-out
+  // and tell the owner to reach the client another way.
+  if (upperText === 'CANCEL' && kwBiz && !kwOwner) {
+    try {
+      const handled = await cancelByKeyword(kwBiz, customerPhone)
+      if (handled) { cancelDebounced(kwBiz.id, customerPhone); return }
+    } catch (e) { console.error('[CANCEL] keyword cancel failed:', e.message) }
+  }
+
+  if (['STOP', 'STOPALL', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT'].includes(upperText) && !kwOwner) {
+    const biz = kwBiz
     if (biz) {
       // Drop any queued texts from this customer — they just opted out, don't
       // let the debounce fire a normal bot reply 5 seconds from now.
@@ -230,8 +320,8 @@ router.post('/sms', validateTwilio, async (req, res) => {
     return // Twilio sends the STOP reply automatically
   }
 
-  if (['START', 'UNSTOP'].includes(upperText) || (upperText === 'YES' && !customerPhone)) {
-    const biz = await db.getBusinessBySmsNumber(toNumber)
+  if ((['START', 'UNSTOP'].includes(upperText) && !kwOwner) || (upperText === 'YES' && !customerPhone)) {
+    const biz = kwBiz || await db.getBusinessBySmsNumber(toNumber)
     if (biz) {
       const sbStart = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
       // Only re-subscribe if customer is actually opted out
@@ -253,8 +343,8 @@ router.post('/sms', validateTwilio, async (req, res) => {
     }
   }
 
-  if (upperText === 'HELP') {
-    const biz = await db.getBusinessBySmsNumber(toNumber)
+  if (upperText === 'HELP' && !kwOwner) {
+    const biz = kwBiz
     if (biz) {
       await sendSMS(toNumber, customerPhone,
         `${biz.business_name} powered by Wexly. Text us to book, reschedule, or ask questions. Reply STOP to unsubscribe. For help: hello@getwexly.com`
@@ -308,8 +398,15 @@ router.post('/sms', validateTwilio, async (req, res) => {
       if (fromOwner) {
         await sendSMS(toNumber, customerPhone, expiredOwnerReply(business)).catch(() => {})
       } else {
-        console.log(`[SMS] ${business.business_name} trial expired — client message from ${customerPhone} dropped`)
+        console.log(`[SMS] ${business.business_name} trial expired — client ${customerPhone} pointed to the business directly`)
+        await pausedClientReply(business, customerPhone, toNumber)
       }
+      return
+    }
+    // v208: card failed or checkout never finished: same courtesy for clients.
+    if (['past_due', 'pending_checkout'].includes(business.status) && !business.demo_mode && !ownerPhoneMatch(business, customerPhone)) {
+      console.log(`[SMS] ${business.business_name} is ${business.status} — client ${customerPhone} pointed to the business directly`)
+      await pausedClientReply(business, customerPhone, toNumber)
       return
     }
 
@@ -466,13 +563,20 @@ router.post('/sms', validateTwilio, async (req, res) => {
           const { recordSetupSource, setupSourceAck, runAutoImport } = require('../bot/trialOnboarding')
           const { normalizeUrl } = require('../utils/siteImporter')
           const srcUrl = normalizeUrl(urlMatch)
-          const fallback = inSetupFlow
-            ? () => sendSMS(toNumber, customerPhone, setupSourceAck(business))
-            : () => sendSMS(toNumber, customerPhone, `I could not read services from that page. Reply SETUP and we will set it up for you, or text me your services and prices and I will add them.`)
-          await sendSMS(toNumber, customerPhone, srcUrl ? `Got it, reading your page now. Give me a minute.` : setupSourceAck(business))
+          const hasPhotos = !!(mediaUrls && mediaUrls.length)
+          // v208: a page we can't read (JavaScript-built sites) or photos the
+          // model couldn't parse → the owner is told plainly and offered the
+          // two paths that always work, and Brandon still gets the human-route email.
+          const fallback = () => sendSMS(toNumber, customerPhone, srcUrl
+            ? `I couldn't read the services off that page (some sites only show them in the app). Two quick options: text me a screenshot of your service list and I'll load it from that, or text me your services and prices like "Balayage 2.5 hr $200, Haircut 45 min $65". Or reply HELP and we'll do it with you.`
+            : hasPhotos
+              ? `I couldn't make out the services in that photo. Try a clearer shot of the price list, or text them to me like "Balayage 2.5 hr $200, Haircut 45 min $65". Or reply HELP and we'll do it with you.`
+              : setupSourceAck(business))
+          await sendSMS(toNumber, customerPhone, srcUrl ? `Got it, reading your page now. Give me a minute.` : hasPhotos ? `Got it, reading your menu now. Give me a minute.` : setupSourceAck(business))
           if (inSetupFlow) recordSetupSource(business, incomingText, mediaUrls).catch(e => console.error('[Owner] setup source record failed:', e.message))
-          // v203: a link gets imported on the spot; if nothing usable comes back, fall back.
+          // v203: a link gets imported on the spot; v208: so do menu photos. Nothing usable → fall back.
           if (srcUrl) runAutoImport(business, srcUrl).then(r => { if (!r) return fallback() }).catch(e => { console.error('[Owner] auto-import failed:', e.message); fallback().catch(() => {}) })
+          else if (hasPhotos) runAutoImport(business, null, { mediaUrls, hint: incomingText }).then(r => { if (!r) return fallback() }).catch(e => { console.error('[Owner] photo import failed:', e.message); fallback().catch(() => {}) })
           return
         }
       }
@@ -643,10 +747,12 @@ router.post('/voice', validateTwilio, async (req, res) => {
       return
     }
 
-    if (!business.missed_call_enabled) {
-      res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`)
-      return
-    }
+    // v208: the number sits in Instagram bios, so people will dial it. With
+    // missed-call text-back off we used to hang up in silence. Now every call
+    // hears that this is the text line and gets a text to reply to; the
+    // missed-call feature below only changes the wording and the forwarding
+    // logic. Still nothing for the owner calling their own number.
+    const textOnly = !business.missed_call_enabled
 
     // ═══════════════════════════════════════════════════════════════════════
     // 🔒 PROTECTED — Carrier-agnostic caller resolution. See PROTECTED_DECISIONS.md
@@ -711,14 +817,18 @@ router.post('/voice', validateTwilio, async (req, res) => {
     const isOwner = matchPhone(ownerClean, callerClean) ||
       additionalClean.some(p => matchPhone(p, callerClean))
 
-    const voiceMsg = business.missed_call_message ||
-      `Thanks for calling ${business.business_name}! We're unavailable right now — we'll text you right back in just a moment.`
+    const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const voiceMsg = textOnly
+      ? `Thanks for calling ${business.business_name}. This number is for booking by text. We're sending you a text right now, just reply to it and we'll get you booked.`
+      : (business.missed_call_message || `Thanks for calling ${business.business_name}! We're unavailable right now — we'll text you right back in just a moment.`)
 
-    res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">${voiceMsg}</Say><Hangup/></Response>`)
+    res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">${esc(voiceMsg)}</Say><Hangup/></Response>`)
 
     if (!isOwner) {
       const botName = business.bot_name || 'your assistant'
-      const textMsg = `Hi! Sorry we missed your call 📞 I'm ${botName} from ${business.business_name}. I can help you book an appointment or answer questions — just text back here!`
+      const textMsg = textOnly
+        ? `Hi! This is ${botName} from ${business.business_name}. This number works by text, so just reply here with what you'd like to book and I'll take care of it.`
+        : `Hi! Sorry we missed your call 📞 I'm ${botName} from ${business.business_name}. I can help you book an appointment or answer questions — just text back here!`
       sendSMS(toNumber, customerPhone, textMsg)
         .then(() => console.log(`[Voice] Texted ${customerPhone} for ${business.business_name}`))
         .catch(err => console.error('[Voice] SMS failed:', err.message))
@@ -743,5 +853,23 @@ router.post('/status', (req, res) => {
     require('../utils/sms').retryUnregistered(MessageSid)
   }
 })
+
+// v208: graceful shutdown. Render sends SIGTERM on every deploy; anything in
+// the 5-second debounce queue used to vanish. Fire every queued conversation
+// now and let index.js wait for the replies before the process exits.
+const inFlight = new Set()
+const _flush = flushDebounced
+flushDebounced = async function (key) { const p = _flush(key); inFlight.add(p); try { return await p } finally { inFlight.delete(p) } }
+async function drainForShutdown(maxMs = 20000) {
+  const keys = [...pendingMessages.keys()]
+  for (const k of keys) { const e = pendingMessages.get(k); if (e?.timer) clearTimeout(e.timer) }
+  if (keys.length) console.log(`[Shutdown] flushing ${keys.length} queued conversation(s)`)
+  await Promise.allSettled(keys.map(k => flushDebounced(k)))
+  const started = Date.now()
+  while (inFlight.size && Date.now() - started < maxMs) await new Promise(r => setTimeout(r, 200))
+  if (inFlight.size) console.log(`[Shutdown] ${inFlight.size} reply(ies) still running after ${maxMs}ms; exiting anyway`)
+}
+router.drainForShutdown = drainForShutdown
+router._test = { cancelByKeyword, pausedClientReply, ownerPhoneMatch }
 
 module.exports = router

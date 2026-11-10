@@ -217,15 +217,28 @@ async function getWaitlistForSlot(businessId, date, time) {
   return data || []
 }
 
-async function flagSession(businessId, customerPhone, reason) {
-  await supabase.from('conversation_sessions').upsert({
+// v208: manualMinutes > 0 hands the thread to the owner for that long (the bot
+// stays quiet, then resumes on its own); 0 just raises the flag and the bot
+// keeps replying. Default stays a 2-hour handoff so older callers behave the
+// same, minus the "silent forever" failure mode.
+async function flagSession(businessId, customerPhone, reason, { manualMinutes = 120 } = {}) {
+  const row = {
     business_id: businessId,
     customer_phone: customerPhone,
     needs_attention: true,
     attention_reason: reason,
-    manual_mode: true,
     last_activity: new Date().toISOString()
-  }, { onConflict: 'business_id,customer_phone' })
+  }
+  if (manualMinutes > 0) { row.manual_mode = true; row.manual_mode_until = new Date(Date.now() + manualMinutes * 60000).toISOString() }
+  await supabase.from('conversation_sessions').upsert(row, { onConflict: 'business_id,customer_phone' })
+}
+// Owner handed a client back to the bot (or took one over) by text.
+async function setManualMode(businessId, customerPhone, on, minutes = 120) {
+  const patch = on
+    ? { manual_mode: true, manual_mode_until: minutes ? new Date(Date.now() + minutes * 60000).toISOString() : null, needs_attention: true, attention_reason: 'Owner took over by text' }
+    : { manual_mode: false, manual_mode_until: null, needs_attention: false }
+  const { error } = await supabase.from('conversation_sessions').upsert({ business_id: businessId, customer_phone: customerPhone, last_activity: new Date().toISOString(), ...patch }, { onConflict: 'business_id,customer_phone' })
+  return !error
 }
 
 async function getCustomerByPhone(businessId, customerPhone) {
@@ -294,6 +307,7 @@ module.exports = {
   getSession,
   upsertSession,
   flagSession,
+  setManualMode,
   getCustomerByPhone,
   getAppointmentsByDate,
   createAppointment,

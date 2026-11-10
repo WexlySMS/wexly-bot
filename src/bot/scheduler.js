@@ -891,6 +891,7 @@ async function sendAbandonedBookingReminders() {
     .lt('last_activity', twoHoursAgo)
     .gt('last_activity', twentyFourHoursAgo)
     .eq('abandoned_reminder_sent', false)
+    .not('customer_phone', 'like', 'owner:%')   // v208: the bot's own owner thread is not an abandoned client
 
   if (sessErr) {
     // Column might not exist yet — silently skip

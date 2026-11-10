@@ -325,15 +325,15 @@ async function recordSetupSource(biz, text, mediaUrls) {
 // v203: when the setup source is a link, build the account from it right
 // away. The owner gets a summary and a YES/fix prompt; Brandon still gets the
 // email so a human can double-check. Photos of a menu still go the human route.
-async function runAutoImport(biz, url) {
-  const { importFromUrl, applyImport } = require('../utils/siteImporter')
-  const data = await importFromUrl(url)
+async function runAutoImport(biz, url, { mediaUrls = null, hint = '' } = {}) {
+  const { importFromUrl, importFromImages, applyImport } = require('../utils/siteImporter')
+  const data = url ? await importFromUrl(url) : await importFromImages(mediaUrls || [], { hint })
   if (data.error || !data.services || !data.services.length) {
     console.log(`[Setup] auto-import found nothing usable for ${biz.business_name}: ${data.error || 'no services'}`)
     return null
   }
   const result = await applyImport(biz.id, data)
-  await announceImport(biz, result, { url })
+  await announceImport(biz, result, { url: url || 'photos' })
   return result
 }
 
@@ -355,7 +355,7 @@ async function announceImport(biz, result, { url = null } = {}) {
   if (result.photos) bits.push(`${result.photos} photo${result.photos === 1 ? '' : 's'}`)
   if (!bits.length) return null
   const page = fresh?.profile_slug ? `${SITE_URL}/book/${fresh.profile_slug}` : null
-  const msg = `Done. I loaded ${bits.join(', ')} from your page.` + (page ? ` Your booking page is live: ${page}` : '') +
+  const msg = `Done. I loaded ${bits.join(', ')} from your ${url === 'photos' ? 'menu' : 'page'}.` + (page ? ` Your booking page is live: ${page}` : '') +
     ` Anything to change, like "make Balayage $240", just tell me.`
   await sendSMS(biz.sms_number, biz.owner_phone, msg)
   try { require('./ownerCommands').noteOwnerOutbound(biz.id, msg) } catch (e) { console.error('[Setup] owner note failed:', e.message) }
@@ -515,10 +515,16 @@ function parseDeposits(text) {
   return out.length ? { items: out } : null
 }
 // Hours by model, into the same shape the importer writes: [{day:'Mon', open:true, from:'09:00', to:'18:00'}|{day, open:false}] x7, Sun first
-async function parseHours(text) {
+// v208: `current` (the saved week) turns this into an edit: "closed Mondays
+// now" or "open till 8 on Thursdays" changes only what the owner mentioned.
+async function parseHours(text, current = null) {
   const Anthropic = require('@anthropic-ai/sdk'); const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+  const cur = Array.isArray(current) && current.length === 7 ? current.map((d, i) => `${DAY_NAMES[i]}: ${d?.open ? `${d.from}-${d.to}` : 'closed'}`).join(', ') : null
+  const prompt = cur
+    ? `Current weekly hours: ${cur}.\nThe owner texted this change: "${text}".\nReturn the full updated week, 7 days Sunday first. Change only the days the owner's text refers to; every other day keeps its current hours exactly. "9 to 6" means 09:00 to 18:00; "till 8" means close 20:00 with the same opening time.`
+    : `Business hours as the owner typed them: "${text}". Return 7 days, Sunday first. Days not mentioned as open are closed. "9 to 6" means 09:00 to 18:00.`
   const r = await client.messages.create({ model: 'claude-sonnet-4-6', max_tokens: 600, tools: [{ name: 'save_hours', description: 'Save weekly hours', input_schema: { type: 'object', properties: { days: { type: 'array', minItems: 7, maxItems: 7, description: 'Exactly 7 entries, Sunday first', items: { type: 'object', properties: { open: { type: 'boolean' }, from: { type: 'string', description: 'HH:MM 24h' }, to: { type: 'string', description: 'HH:MM 24h' } }, required: ['open'] } } }, required: ['days'] } }], tool_choice: { type: 'tool', name: 'save_hours' },
-    messages: [{ role: 'user', content: `Business hours as the owner typed them: "${text}". Return 7 days, Sunday first. Days not mentioned as open are closed. "9 to 6" means 09:00 to 18:00.` }] })
+    messages: [{ role: 'user', content: prompt }] })
   const tu = r.content.find(c => c.type === 'tool_use'); const days = tu?.input?.days
   if (!Array.isArray(days) || days.length !== 7) return null
   const week = days.map((d, i) => (d.open && d.from && d.to) ? { day: DAY_NAMES[i], open: true, from: d.from, to: d.to } : { day: DAY_NAMES[i], open: false })
@@ -742,7 +748,7 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
     const have = new Set(existing.map(st => st.name.toLowerCase()))
     const added = names.filter(n => !have.has(n.toLowerCase())).map(n => ({ name: n.replace(/\b\w/g, c => c.toUpperCase()), phone: '', email: '', auto_schedule: false, notify_via: 'email' }))
     await supabase.from('businesses').update({ staff_members: [...existing, ...added] }).eq('id', biz.id)
-    await say(`Added ${added.map(a => a.name).join(', ')}. Clients can ask for them by name. Add their phone or email in your dashboard under Staff if you want them notified.`)
+    await say(`Added ${added.map(a => a.name).join(', ')}. Clients can ask for them by name. Add their phone or email in your dashboard under Staff if you want them notified.${String(biz.plan || '').toLowerCase() === 'solo' ? ' One thing: your Solo plan is built for one provider, so when you get a chance, switch to Standard in the app under Billing to keep staff booking in step.' : ''}`)
     await setPending(biz, null, { staff_at: new Date().toISOString() })
     await advanceSetup(biz, 'staff'); return '__sent__'
   }
@@ -969,6 +975,6 @@ async function runTrialOnboardingDrip() {
 module.exports = {
   normalizeUSPhone, formatPhone,
   sendVerificationCode, verifyCode, isRecentlyVerified, phoneAlreadyUsedTrial,
-  lineTypeCheck, activateInstantTrial, sendTrialWelcome, ensureProfileSlug, profileUrl, runAutoImport, announceImport, handlePendingOwnerReply, handleCalendarInput, advanceSetup, resumeSetup, shortQuestion, setupOfferReply, recordSetupRequest, recordSetupSource, setupSourceAck, expiredOwnerReply,
+  lineTypeCheck, activateInstantTrial, sendTrialWelcome, ensureProfileSlug, profileUrl, runAutoImport, announceImport, handlePendingOwnerReply, handleCalendarInput, advanceSetup, resumeSetup, shortQuestion, parseHours, describeHours, setupOfferReply, recordSetupRequest, recordSetupSource, setupSourceAck, expiredOwnerReply,
   runTrialOnboardingDrip, addCardLink, TRIAL_DAYS
 }

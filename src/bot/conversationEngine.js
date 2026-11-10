@@ -192,6 +192,7 @@ ${blockedText}
 ${faqsText ? `## FREQUENTLY ASKED QUESTIONS\nAnswer these accurately when asked:\n\n${faqsText}` : ''}
 
 ${business.bot_restrictions ? `## IMPORTANT RULES — NEVER BREAK THESE\n${business.bot_restrictions}` : ''}
+${policyBlock(business)}
 
 ${business.bot_instructions ? `## CUSTOM INSTRUCTIONS FROM THE BUSINESS OWNER\nFollow these instructions carefully — they are specific to how this business operates:\n${business.bot_instructions}` : ''}
 
@@ -230,7 +231,8 @@ DO NOT include the meeting link in your booking confirmation reply — the serve
 - NEVER MAKE THINGS UP: Only mention services, prices, staff, and availability that are in this system prompt or returned by tools. If you don't know something, say "I'm not sure about that — let me have the team get back to you" and flag the conversation for attention.
 - SERVICE NOT FOUND: If a customer asks for a service you don't offer, tell them what you DO offer. Never book a different service than what they asked for. Say something like "We don't offer that, but here's what we have: [list services]."
 - LISTING SERVICES: When a customer asks what services are available, ALWAYS list ALL services — including ones that require approval or quotes. Never skip or hide a service. Every service listed in this prompt must be mentioned.
-- RESCHEDULE REQUESTS: When a customer says "reschedule", "move my appointment", "change my time", or similar — first look up their existing appointment, then check availability for their preferred new date/time. Cancel the old one and create the new one. When you call create_appointment for the new time, set is_reschedule: true so the owner is notified it's a reschedule, not a brand-new booking. Walk them through it step by step.
+- BOOKING FOR SOMEONE ELSE: if they're booking for another person ("for my daughter", "my husband needs a cut"), collect the GUEST's first and last name for the booking, ask once whether reminders should go to the guest's phone (and get the number) or to the texter, then book with booking_for_someone_else: true (and guest_phone if given). Confirm back naming the guest.
+- RESCHEDULE REQUESTS: When a customer says "reschedule", "move my appointment", "change my time", or similar — look up their existing appointment (get_existing_appointment), check availability for the new date/time, then call reschedule_appointment. Never cancel-and-rebook for a reschedule: the tool moves it in place so they keep their slot if the new time falls through, and their deposit stays attached. Do not re-ask for name or email; you already have them.
 - SWITCHING SERVICES: If a customer says "I want to change to a different service", "switch my appointment to X", or "can I do X instead" — this means cancel their existing appointment and book the new service. Don't tell them the slot is unavailable because of their own booking. Cancel first, then book the new one.
 - If a customer already has a booking and tries to book the same time slot with a different service, their existing appointment is what's blocking availability. Cancel it first, then rebook.
 - MULTIPLE APPOINTMENTS: A customer may have multiple appointments (confirmed, pending, quote_sent). When they text, use conversation context to determine which appointment they're referring to. If they were just asked to rebook (due to owner reschedule), they're picking a new date — treat it as a fresh booking. Don't confuse it with other pending appointments.
@@ -344,7 +346,9 @@ const tools = [
         notes: { type: 'string' },
         recurring_interval_weeks: { type: 'number', description: 'If customer wants recurring bookings, number of weeks between appointments (e.g. 4 for every 4 weeks, 6 for every 6 weeks). Only set if customer explicitly asks for recurring/repeat bookings.' },
         recurring_count: { type: 'number', description: 'How many total appointments to book including the first one. Default 6 if recurring. Max 12.' },
-        is_reschedule: { type: 'boolean', description: 'Set true ONLY when this booking is replacing an appointment the customer just rescheduled (i.e. you cancelled their old appointment and are creating the new time). This changes the owner notification to say "Rescheduled" instead of "New booking". Leave unset for normal new bookings.' }
+        is_reschedule: { type: 'boolean', description: 'Set true ONLY when this booking is replacing an appointment the customer just rescheduled (i.e. you cancelled their old appointment and are creating the new time). This changes the owner notification to say "Rescheduled" instead of "New booking". Leave unset for normal new bookings.' },
+        booking_for_someone_else: { type: 'boolean', description: 'true when the texter is booking for another person (their daughter, husband, friend). Then customer_first_name/last_name are the GUEST\'s name, and guest_phone is where reminders go if they gave one.' },
+        guest_phone: { type: 'string', description: 'The guest\'s mobile number if the texter provided it; otherwise omit and reminders go to the texter.' }
       },
       // 🔒 PROTECTED — required must include all three of customer_first_name,
       // 🔒 customer_last_name, AND customer_email. Do not loosen.
@@ -358,6 +362,20 @@ const tools = [
     name: 'get_existing_appointment',
     description: "Look up the customer's existing upcoming appointment.",
     input_schema: { type: 'object', properties: {}, required: [] }
+  },
+  {
+    name: 'reschedule_appointment',
+    description: 'Move the customer\'s existing appointment to a new date/time in ONE step. Use whenever they say reschedule / move / change my time / can we do Friday instead. First call get_existing_appointment (to know which one) and check_availability for the new time; then call this. The old slot is kept until the new one is confirmed free, so the customer never loses their booking. Any deposit stays attached. Do NOT cancel and re-book for a reschedule.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        appointment_id: { type: 'string', description: 'From get_existing_appointment' },
+        new_date: { type: 'string', description: 'YYYY-MM-DD' },
+        new_time: { type: 'string', description: 'HH:MM 24h' },
+        staff_member: { type: 'string', description: 'Only if they asked to change who they see' }
+      },
+      required: ['new_date', 'new_time']
+    }
   },
   {
     name: 'cancel_appointment',
@@ -619,11 +637,13 @@ async function executeTool(toolName, input, context) {
       if (blocked) return { available: false, message: 'This date is fully blocked.' }
 
       const serviceName = input.service_name || ''
-      const service = profile.services.find(s =>
-        s.name.toLowerCase().includes(serviceName.toLowerCase())
-      ) || profile.services[0]
-      const duration = input.total_duration_mins || service?.duration_mins || 60
-      const capacity = service?.capacity || 1
+      // v208: combos ("cut and color") check the combined duration and the tightest start window.
+      const requestedSvcs = resolveRequestedServices(profile.services, serviceName, profile.bundles)
+      const service = requestedSvcs.length > 1
+        ? requestedSvcs.reduce((w, s) => ({ ...w, earliest_start: [w.earliest_start, s.earliest_start].filter(Boolean).sort().pop() || null, latest_start: [w.latest_start, s.latest_start].filter(Boolean).sort()[0] || null }), { ...requestedSvcs[0], name: requestedSvcs.map(s => s.name).join(' + '), earliest_start: null, latest_start: null })
+        : (requestedSvcs[0] || profile.services[0])
+      const duration = input.total_duration_mins || (requestedSvcs.length ? requestedSvcs.reduce((sum, s) => sum + (s.duration_mins || 60), 0) : (service?.duration_mins || 60))
+      const capacity = requestedSvcs.length ? Math.min(...requestedSvcs.map(s => s.capacity || 1)) : (service?.capacity || 1)
 
       // For class/group services — check remaining capacity
       if (service?.booking_mode === 'class') {
@@ -730,18 +750,26 @@ async function executeTool(toolName, input, context) {
       // ── Get existing appointments ───────────────────────────────────────
       const existing = await db.getAppointmentsByDate(business.id, input.date)
 
-      // Find the service to get its capacity
-      const serviceForCap = profile.services.find(s =>
-        s.name.toLowerCase().includes((input.service_name || '').toLowerCase())
-      ) || profile.services[0]
-      const capacity = serviceForCap?.capacity || 1
+      // v208: "Haircut, Color" / "cut + color" / "balayage and a trim" resolve to
+      // the real services so the slot check uses the COMBINED duration and the
+      // booking can't fail with "we don't offer Haircut, Color".
+      const requested = resolveRequestedServices(profile.services, input.service_name, profile.bundles)
+      if (input.service_name && !requested.length) {
+        return { success: false, error: `We don't offer "${input.service_name}". Our services: ${profile.services.map(s => s.name).join(', ')}` }
+      }
+      const serviceForCap = requested[0] || profile.services[0]
+      const capacity = requested.length ? Math.min(...requested.map(s => s.capacity || 1)) : (serviceForCap?.capacity || 1)
+      const comboDuration = input.total_duration_mins || (requested.length ? requested.reduce((sum, s) => sum + (s.duration_mins || 60), 0) : (serviceForCap?.duration_mins || 60))
+      // A combo honours the tightest start window among its services.
+      const comboWindow = requested.length > 1 ? requested.reduce((w, s) => ({ earliest_start: [w.earliest_start, s.earliest_start].filter(Boolean).sort().pop() || null, latest_start: [w.latest_start, s.latest_start].filter(Boolean).sort()[0] || null, name: w.name }), { name: requested.map(s => s.name).join(' + ') }) : serviceForCap
 
       // Check if this specific slot is still available given staff capacity
       if (input.time && serviceForCap?.booking_mode !== 'class') {
-        const slots = getAvailableSlots(business, input.date, existing, serviceForCap?.duration_mins || 60, profile.blockedDates, capacity, input.service_name, serviceForCap)
+        const slots = getAvailableSlots(business, input.date, existing, comboDuration, profile.blockedDates, capacity, input.service_name, comboWindow)
         if (!slots.includes(input.time)) {
-          if (serviceWindowText(serviceForCap) && !applyServiceWindow([String(input.time).slice(0, 5)], serviceForCap).length) return { success: false, error: `${serviceForCap.name} ${serviceWindowText(serviceForCap)}. Please pick a time that works within that.` }
-          return { success: false, error: 'That slot is no longer available — all staff are booked at that time.' }
+          if (serviceWindowText(comboWindow) && !applyServiceWindow([String(input.time).slice(0, 5)], comboWindow).length) return { success: false, error: `${comboWindow.name} ${serviceWindowText(comboWindow)}. Please pick a time that works within that.` }
+          const alt = slots.slice(0, 5).map(formatTime).join(', ')
+          return { success: false, error: `That slot is no longer available${requested.length > 1 ? ` for the ${Math.round(comboDuration / 60 * 10) / 10}-hour combination` : ''}.${alt ? ` Open that day: ${alt}.` : ' Nothing else is open that day.'}` }
         }
       } else if (input.time && serviceForCap?.booking_mode === 'class') {
         // For classes — check capacity not slot blocking
@@ -754,14 +782,9 @@ async function executeTool(toolName, input, context) {
         if (classCount >= classCapacity) return { success: false, error: `That class is now full (${classCapacity}/${classCapacity} spots). Would you like to join the waitlist?` }
       }
 
-      var service = profile.services.find(s =>
-        s.name.toLowerCase().includes((input.service_name || '').toLowerCase())
-      )
-      if (!service && input.service_name) {
-        var available = profile.services.map(s => s.name).join(', ')
-        return { success: false, error: `We don't offer "${input.service_name}". Our services: ${available}` }
-      }
-      if (!service) service = profile.services[0]
+      var service = requested[0] || profile.services[0]
+      // The stored service name lists every service in the combo as the business names them.
+      const storedServiceName = requested[0]?.bundleName ? requested[0].bundleName : requested.length > 1 ? requested.map(s => s.name).join(' + ') : (requested[0]?.name || input.service_name || service?.name || 'Appointment')
 
       // Clear STALE completed intake state. session.intake.complete persists in
       // session_state; a leftover 'complete' from a PRIOR booking would make this
@@ -818,21 +841,19 @@ async function executeTool(toolName, input, context) {
         }
       }
 
-      // Multi-service: sum durations if total_duration_mins not provided
-      let totalDuration = input.total_duration_mins || null
-      if (!totalDuration) {
-        if (input.service_name && input.service_name.includes(',')) {
-          const serviceNames = input.service_name.split(',').map(s => s.trim().toLowerCase())
-          totalDuration = serviceNames.reduce((sum, sName) => {
-            const match = profile.services.find(s => s.name.toLowerCase().includes(sName))
-            return sum + (match?.duration_mins || 60)
-          }, 0)
-        } else {
-          totalDuration = service?.duration_mins || 60
-        }
-      }
+      // Multi-service: combined duration resolved above.
+      let totalDuration = comboDuration
 
       let notes = input.notes || null
+      // v208: booked on someone's behalf. Reminders go to the guest when a number
+      // was given; otherwise to the texter, with a note so the owner knows who's who.
+      let guestPhone = null
+      if (input.booking_for_someone_else) {
+        let gd = String(input.guest_phone || '').replace(/\D/g, ''); if (gd.length === 11 && gd.startsWith('1')) gd = gd.slice(1)
+        if (gd.length === 10 && ('+1' + gd) !== customerPhone) guestPhone = '+1' + gd
+        const bookedBy = returningCustomer?.customer_name ? `${returningCustomer.customer_name} (${customerPhone})` : customerPhone
+        notes = [`Booked by ${bookedBy} for ${customerName}${guestPhone ? '' : '; reminders go to the booker'}`, notes].filter(Boolean).join(' | ')
+      }
 
       // Auto-assign staff member
       let assignedStaff = null
@@ -894,10 +915,10 @@ async function executeTool(toolName, input, context) {
 
       const appt = await db.createAppointment({
         business_id: business.id,
-        customer_phone: customerPhone,
+        customer_phone: guestPhone || customerPhone,
         customer_name: customerName,
         service_id: service?.id || null,
-        service_name: input.service_name || service?.name || 'Appointment',
+        service_name: storedServiceName,
         appointment_date: input.date,
         appointment_time: input.time,
         duration_mins: totalDuration,
@@ -1119,9 +1140,9 @@ async function executeTool(toolName, input, context) {
             recurDates.push(dateStr)
             await sbRecur.from('appointments').insert({
               business_id: business.id,
-              customer_phone: customerPhone,
+              customer_phone: guestPhone || customerPhone,
               customer_name: customerName,
-              service_name: input.service_name || service?.name || 'Appointment',
+              service_name: storedServiceName,
               service_id: service?.id || null,
               appointment_date: dateStr,
               appointment_time: input.time,
@@ -1220,6 +1241,58 @@ async function executeTool(toolName, input, context) {
       }
     }
 
+    case 'reschedule_appointment': {
+      // v208: move in place. Old slot survives until the new one is verified.
+      const sbR = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+      const tzR = business.timezone || 'America/New_York'
+      const todayR = new Date().toLocaleDateString('en-CA', { timeZone: tzR })
+      let appt = null
+      if (input.appointment_id) ({ data: appt } = await sbR.from('appointments').select('*').eq('id', input.appointment_id).eq('business_id', business.id).maybeSingle())
+      if (!appt) ({ data: appt } = await sbR.from('appointments').select('*').eq('business_id', business.id).eq('customer_phone', customerPhone).in('status', ['confirmed', 'deposit_pending', 'pending_approval', 'pending']).gte('appointment_date', todayR).order('appointment_date', { ascending: true }).order('appointment_time', { ascending: true }).limit(1).maybeSingle())
+      if (!appt) return { success: false, error: 'No upcoming appointment found to move. Ask which appointment they mean, or offer to book a new one.' }
+      const newDate = String(input.new_date || ''), newTime = String(input.new_time || '').slice(0, 5)
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(newDate) || !/^\d{2}:\d{2}$/.test(newTime)) return { success: false, error: 'Need the new date (YYYY-MM-DD) and time (HH:MM).' }
+      if (newDate < todayR) return { success: false, error: 'That date is in the past.' }
+      if (business.demo_mode) return { success: true, moved_to: `${formatDate(newDate)} at ${formatTime(newTime)}`, note: 'Demo: nothing stored.' }
+      return await withBookingLock(business.id, newDate, async () => {
+        const existingR = (await db.getAppointmentsByDate(business.id, newDate)).filter(a => a.id !== appt.id)
+        const svcR = resolveRequestedServices(profile.services, appt.service_name, profile.bundles)
+        const svcRow = svcR[0] || profile.services.find(s => s.id === appt.service_id) || null
+        const slots = getAvailableSlots(business, newDate, existingR, appt.duration_mins || svcRow?.duration_mins || 60, profile.blockedDates, svcRow?.capacity || 1, appt.service_name, svcRow)
+        if (!slots.includes(newTime)) {
+          if (svcRow && serviceWindowText(svcRow) && !applyServiceWindow([newTime], svcRow).length) return { success: false, error: `${svcRow.name} ${serviceWindowText(svcRow)}. Their current appointment is unchanged.`, alternatives: slots.slice(0, 6) }
+          return { success: false, error: `${formatTime(newTime)} on ${formatDate(newDate)} isn't open. Their current appointment is unchanged.`, alternatives: slots.slice(0, 6) }
+        }
+        let staffPatch = {}
+        if (input.staff_member) {
+          const st = (business.staff_members || []).find(x => x?.name && x.name.toLowerCase().includes(String(input.staff_member).toLowerCase()))
+          if (st) staffPatch = { staff_id: st.id || null, staff_name: st.name }
+        }
+        const { data: moved, error } = await sbR.from('appointments').update({ appointment_date: newDate, appointment_time: newTime, reminder_sent: false, short_reminder_sent: false, updated_at: new Date().toISOString(), ...staffPatch }).eq('id', appt.id).select().maybeSingle()
+        if (error || !moved) return { success: false, error: 'Could not move it just now. Their current appointment is unchanged; try once more.' }
+        // Free the old slot for anyone waiting on it.
+        try {
+          const waiters = await db.getWaitlistForSlot(business.id, appt.appointment_date, appt.appointment_time)
+          if (waiters.length) {
+            await sbR.from('waitlist').update({ slot_held_until: new Date(Date.now() + 30 * 60000).toISOString() }).eq('id', waiters[0].id)
+            await sendSMS(business.sms_number, waiters[0].customer_phone, `Great news! A spot just opened up at ${business.business_name} on ${formatDate(appt.appointment_date)} at ${formatTime(appt.appointment_time)}. We're holding it for you for 30 minutes, just text back to claim it! 🎉`).catch(() => {})
+          }
+        } catch (e) { console.error('[Reschedule] waitlist notify failed:', e.message) }
+        sendBookingNotification({
+          ownerEmail: shouldSendNotification(business, 'new_booking_email') ? business.email : null,
+          ownerPhone: shouldSendNotification(business, 'new_booking_sms') ? business.owner_phone : null,
+          businessName: business.business_name, smsNumber: business.sms_number,
+          customerName: appt.customer_name || returningCustomer?.customer_name || 'Customer', customerPhone,
+          serviceName: appt.service_name || 'Appointment', appointmentDate: newDate, appointmentTime: newTime,
+          notes: `Moved from ${formatDate(appt.appointment_date)} ${formatTime(appt.appointment_time)}`, isReschedule: true
+        }).catch(err => console.error('[Notify] Reschedule notification failed:', err.message))
+        try { require('../utils/push').pushNewBooking(business, { customerName: appt.customer_name || 'Customer', customerPhone, serviceName: appt.service_name || 'Appointment', appointmentDate: newDate, appointmentTime: newTime, isReschedule: true }).catch(() => {}) } catch (e) {}
+        session.lastAppointmentId = appt.id
+        console.log(`[Reschedule] ${customerPhone} moved appt ${appt.id} → ${newDate} ${newTime}`)
+        return { success: true, moved_to: `${formatDate(newDate)} at ${formatTime(newTime)}`, service: appt.service_name, deposit_kept: appt.deposit_status === 'paid' }
+      })
+    }
+
     case 'cancel_appointment': {
       const sbCancel = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
       let { data: apptToCancel } = await sbCancel
@@ -1248,6 +1321,42 @@ async function executeTool(toolName, input, context) {
       }
 
       await db.updateAppointment(input.appointment_id, { status: 'cancelled' })
+
+      // v208: inside the cancellation window → tell the client the policy applies
+      // and let the owner know it was a late cancel. The cancel itself still happens.
+      let lateCancel = false
+      try {
+        const w = cancelWindowHours(business)
+        if (w && apptToCancel?.appointment_date && apptToCancel?.appointment_time) {
+          const tzL = business.timezone || 'America/New_York'
+          const [hh, mm] = String(apptToCancel.appointment_time).split(':').map(Number)
+          const [y, mo, d] = String(apptToCancel.appointment_date).split('-').map(Number)
+          const asUtc = Date.UTC(y, mo - 1, d, hh, mm || 0)
+          const parts = new Intl.DateTimeFormat('en-US', { timeZone: tzL, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date(asUtc))
+          const g = (k) => Number(parts.find(p => p.type === k).value)
+          const offset = Date.UTC(g('year'), g('month') - 1, g('day'), g('hour') % 24, g('minute')) - asUtc
+          const startEpoch = asUtc - offset
+          const hoursUntil = (startEpoch - Date.now()) / 3600000
+          if (hoursUntil >= 0 && hoursUntil < w) {
+            lateCancel = true
+            session.pendingAppends = (session.pendingAppends || '') + ` Just so you know, this is inside our ${w}-hour cancellation window, so our late-cancellation policy applies${business.pro_settings?.late_cancel_note ? ` (${business.pro_settings.late_cancel_note})` : ''}.`
+            await db.flagSession(business.id, customerPhone, `Late cancel (${Math.round(hoursUntil)}h notice): ${apptToCancel.service_name || 'appointment'} on ${apptToCancel.appointment_date}`, { manualMinutes: 0 }).catch(() => {})
+          }
+        }
+      } catch (e) { console.error('[Cancel] late-cancel check failed:', e.message) }
+
+      // v208: the owner hears about conversational cancels too (only the
+      // reminder-reply path used to notify them).
+      if (shouldSendNotification(business, 'cancellation_sms') || shouldSendNotification(business, 'cancellation_email')) {
+        sendEscalationNotification({
+          ownerEmail: shouldSendNotification(business, 'cancellation_email') ? business.email : null,
+          ownerPhone: shouldSendNotification(business, 'cancellation_sms') ? business.owner_phone : null,
+          businessName: business.business_name, smsNumber: business.sms_number, customerPhone,
+          customerName: apptToCancel?.customer_name || returningCustomer?.customer_name || null,
+          customerMessage: `${lateCancel ? 'LATE cancel: ' : 'Cancelled: '}${apptToCancel?.service_name || 'appointment'} on ${formatDate(apptToCancel?.appointment_date)} at ${formatTime(apptToCancel?.appointment_time)}`,
+          trigger: 'cancellation', tier: 'cancellation'
+        }).catch(err => console.error('[Notify] Cancellation notification failed:', err.message))
+      }
 
       // Native app push: customer cancelled by text (additive, never blocks the reply)
       try { require('../utils/push').pushCancellation(business, { customerName: apptToCancel?.customer_name || '', customerPhone, serviceName: apptToCancel?.service_name || 'Appointment', appointmentDate: apptToCancel?.appointment_date, appointmentTime: apptToCancel?.appointment_time }).catch(() => {}) } catch (e) {}
@@ -1419,19 +1528,70 @@ async function executeTool(toolName, input, context) {
 
 // ── Main handler ──────────────────────────────────────────────────────────────
 // ── Escalation detection ──────────────────────────────────────────────────────
-const ESCALATION_TRIGGERS = [
-  'speak to someone', 'speak with someone', 'talk to someone', 'talk to a person',
-  'real person', 'human', 'manager', 'owner', 'supervisor',
-  'urgent', 'emergency', 'asap', 'right away', 'immediately',
-  'complaint', 'complain', 'unhappy', 'not happy', 'frustrated', 'angry', 'upset',
-  'refund', 'charge', 'billing', 'overcharged', 'wrong charge',
-  'sue', 'lawyer', 'legal', 'report you',
-  'this is ridiculous', 'unacceptable', 'terrible', 'horrible', 'worst'
-]
+// v208: two tiers, both word-bounded so "how much do you charge" or "is the
+// owner doing my hair" never trip them.
+//   HANDOFF   — the client asked for a person, or is hostile/legal. Owner is
+//               texted, the bot steps back for 2 hours (manual_mode_until) so
+//               the owner can reply themselves, then quietly resumes. The owner
+//               can hand it back sooner by text ("I've got Jess").
+//   HEADS_UP  — refund / unhappy / billing words. Owner is texted so they know,
+//               the bot keeps helping normally.
+const HANDOFF_RE = /\b(speak|talk)\s+(to|with)\s+(a\s+)?(someone|a person|person|human|real person|the owner|owner|the manager|manager|supervisor)\b|\b(real person|actual person|a human|not a bot|are you a bot\??\s*i want)\b|\b(emergency)\b|\b(file a complaint|formal complaint|complaint)\b|\b(sue|lawyer|attorney|legal action|report you|bbb)\b|\b(this is ridiculous|unacceptable|scam|fraud)\b/i
+const HEADS_UP_RE = /\b(refund|overcharged|wrong charge|double charged|charged twice|unhappy|not happy|frustrated|angry|upset|disappointed|terrible|horrible|worst)\b/i
+
+// v208: "Haircut, Color", "cut + color", "balayage and a trim", a bundle name,
+// or one service → the matching service rows, in the order asked. Unmatched
+// parts are dropped; an empty result with a non-empty request means nothing
+// matched at all. Matching is case-insensitive, partial either way, and
+// prefers the longest service name so "color" doesn't grab "Color Correction"
+// over "Solid Color" when both exist and the client said "solid color".
+function resolveRequestedServices(services, requestedText, bundles = []) {
+  const txt = String(requestedText || '').trim()
+  if (!txt) return []
+  // A bundle name expands to its services (owner-defined combos).
+  const bundle = (bundles || []).find(b => b.name && (b.name.toLowerCase() === txt.toLowerCase() || txt.toLowerCase().includes(b.name.toLowerCase())))
+  if (bundle && Array.isArray(bundle.services)) {
+    const rows = bundle.services.map(n => services.find(s => s.name.toLowerCase() === String(n).toLowerCase()) || services.find(s => s.name.toLowerCase().includes(String(n).toLowerCase()))).filter(Boolean)
+    if (rows.length) return rows.map((r, i) => i === 0 ? { ...r, bundleName: bundle.name, bundlePrice: bundle.bundle_price || null } : r)
+  }
+  const byLen = [...services].sort((a, b) => b.name.length - a.name.length)
+  const match = (part) => {
+    const p = part.toLowerCase().replace(/^(a|an|the)\s+/, '').trim()
+    if (!p) return null
+    return byLen.find(s => s.name.toLowerCase() === p) || byLen.find(s => s.name.toLowerCase().includes(p)) || byLen.find(s => p.includes(s.name.toLowerCase())) || null
+  }
+  const whole = match(txt)
+  const parts = txt.split(/\s*(?:,|\+|&|\band\b|\bwith\b|\bplus\b)\s*/i).map(x => x.trim()).filter(Boolean)
+  if (parts.length <= 1) return whole ? [whole] : []
+  const found = parts.map(match).filter(Boolean)
+  const unique = found.filter((s, i) => found.findIndex(x => x.id === s.id) === i)
+  if (unique.length) return unique
+  return whole ? [whole] : []
+}
+
+// v208: the owner's policies (as shown on the booking page) plus the
+// cancellation window, so the bot can answer "what's your cancellation
+// policy" and warn on a late cancel instead of guessing.
+function cancelWindowHours(business) {
+  const h = Number(business.pro_settings?.cancel_window_hours)
+  return Number.isFinite(h) && h > 0 ? h : 0
+}
+function policyBlock(business) {
+  const lines = []
+  const txt = String(business.profile_policies || '').trim()
+  if (txt) lines.push(txt.slice(0, 1200))
+  const w = cancelWindowHours(business)
+  if (w) lines.push(`Cancellations or reschedules with less than ${w} hours' notice count as late. You can still cancel for the client, but tell them it is inside the ${w}-hour window and that the business's late policy applies${business.pro_settings?.late_cancel_note ? ` (${business.pro_settings.late_cancel_note})` : ''}.`)
+  if (business.deposit_policy && business.deposit_policy !== 'non_refundable') lines.push(`Deposits are ${business.deposit_policy === 'refundable' ? 'refundable on cancellation' : `transferable to a rebooking within ${business.deposit_transfer_days || 48} hours`}.`)
+  else if (business.deposit_policy === 'non_refundable') lines.push('Deposits are non-refundable.')
+  return lines.length ? `## POLICIES (quote these when asked; never invent others)\n${lines.join('\n')}` : ''
+}
 
 function detectEscalation(text) {
-  const lower = text.toLowerCase()
-  return ESCALATION_TRIGGERS.find(trigger => lower.includes(trigger)) || null
+  const t = String(text || '')
+  const h = t.match(HANDOFF_RE); if (h) return { tier: 'handoff', trigger: h[0] }
+  const u = t.match(HEADS_UP_RE); if (u) return { tier: 'heads_up', trigger: u[0] }
+  return null
 }
 
 // Detect whether the customer is actually trying to book (vs. just saying hi or
@@ -1662,7 +1822,7 @@ async function handleIncomingMessage({ business, customerPhone, incomingText, me
             console.error(`[Reminder-Confirm] CANCEL FAILED for appt ${remindedAppt.id}:`, cancelErr?.message || 'no rows updated')
             const failReply = `I'm having trouble cancelling that right now. I've flagged it for ${business.business_name} so they can take care of it — sorry about that!`
             // Flag for owner so it doesn't fall through the cracks
-            await db.flagSession(business.id, customerPhone, `Cancellation FAILED via reminder reply — appt ${remindedAppt.id} on ${remindedAppt.appointment_date}. Needs manual cancel.`).catch(() => {})
+            await db.flagSession(business.id, customerPhone, `Cancellation FAILED via reminder reply — appt ${remindedAppt.id} on ${remindedAppt.appointment_date}. Needs manual cancel.`, { manualMinutes: 0 }).catch(() => {})
             session.messages.push({ role: 'user', content: incomingText, media: mediaUrls.length ? mediaUrls : undefined })
             session.messages.push({ role: 'assistant', content: failReply })
             await db.upsertSession(business.id, customerPhone, session.messages, session.lastAppointmentId, sessionStateOf(session))
@@ -1679,8 +1839,9 @@ async function handleIncomingMessage({ business, customerPhone, incomingText, me
               businessName: business.business_name,
               smsNumber: business.sms_number,
               customerPhone,
-              customerMessage: `Cancelled via reminder reply: ${remindedAppt.service_name || 'appointment'} on ${remindedAppt.appointment_date}`,
-              trigger: 'cancellation'
+              customerName: remindedAppt.customer_name || null,
+              customerMessage: `Cancelled (replied NO to the reminder): ${remindedAppt.service_name || 'appointment'} on ${formatDate(remindedAppt.appointment_date)} at ${formatTime(remindedAppt.appointment_time)}`,
+              trigger: 'cancellation', tier: 'cancellation'
             }).catch(err => console.error('[Notify] Cancellation notification failed:', err.message))
           }
           const reply = `No problem — I've cancelled your appointment on ${formatDate(remindedAppt.appointment_date)}. If you'd like to rebook, just let me know! 😊`
@@ -1694,10 +1855,12 @@ async function handleIncomingMessage({ business, customerPhone, incomingText, me
   }
 
   // ── Check for escalation triggers ─────────────────────────────────────────
-  const escalationTrigger = detectEscalation(incomingText)
-  if (escalationTrigger) {
-    console.log(`[Escalation] Triggered by "${escalationTrigger}" from ${customerPhone}`)
-    await db.flagSession(business.id, customerPhone, `Customer said: "${incomingText}"`)
+  const escalation = detectEscalation(incomingText)
+  if (escalation) {
+    const escalationTrigger = escalation.trigger
+    console.log(`[Escalation] ${escalation.tier} triggered by "${escalationTrigger}" from ${customerPhone}`)
+    // handoff: bot steps back for 2h. heads_up: flag only, bot keeps going.
+    await db.flagSession(business.id, customerPhone, `Customer said: "${incomingText}"`, { manualMinutes: escalation.tier === 'handoff' ? 120 : 0 })
     if (shouldSendNotification(business, 'escalation_email') || shouldSendNotification(business, 'escalation_sms')) {
       sendEscalationNotification({
         ownerEmail: shouldSendNotification(business, 'escalation_email') ? business.email : null,
@@ -1706,11 +1869,15 @@ async function handleIncomingMessage({ business, customerPhone, incomingText, me
         smsNumber: business.sms_number,
         customerPhone,
         customerMessage: incomingText,
-        trigger: escalationTrigger
+        trigger: escalationTrigger,
+        tier: escalation.tier,
+        customerName: returningCustomer?.customer_name || null
       }).catch(err => console.error('[Notify] Escalation notification failed:', err.message))
     }
     // Native app push (additive; no-op until Firebase is configured)
     try { require('../utils/push').pushEscalation(business, { customerPhone, customerMessage: incomingText, trigger: escalationTrigger }).catch(() => {}) } catch (e) {}
+  }
+  if (escalation && escalation.tier === 'handoff') {
     const reply = `I completely understand, and I want to make sure you get the help you need. I've flagged this for ${business.business_name} and someone will reach out to you directly as soon as possible. We appreciate your patience. 🙏`
     session.messages.push({ role: 'user', content: incomingText, media: mediaUrls.length ? mediaUrls : undefined })
     session.messages.push({ role: 'assistant', content: reply })
@@ -1854,6 +2021,16 @@ async function handleIncomingMessage({ business, customerPhone, incomingText, me
 
     const textBlock = response.content.find(b => b.type === 'text')
     finalResponse = textBlock?.text || "Sorry, I didn't catch that. Could you try again?"
+    // v208: the prompt lets the model mark an abusive/unsafe message with
+    // NEEDS_ATTENTION. Strip it so it never reaches the client, flag the
+    // thread for the owner (bot keeps replying; owner can take over by text).
+    if (/NEEDS_ATTENTION/.test(finalResponse)) {
+      finalResponse = finalResponse.replace(/\s*\[?NEEDS_ATTENTION\]?\s*/g, ' ').replace(/\s{2,}/g, ' ').trim() || `I've passed this along to ${business.business_name} and they'll follow up with you directly.`
+      db.flagSession(business.id, customerPhone, `Flagged by the bot as needing a human: "${String(incomingText).slice(0, 200)}"`, { manualMinutes: 0 }).catch(() => {})
+      if (shouldSendNotification(business, 'escalation_sms') || shouldSendNotification(business, 'escalation_email')) {
+        sendEscalationNotification({ ownerEmail: shouldSendNotification(business, 'escalation_email') ? business.email : null, ownerPhone: shouldSendNotification(business, 'escalation_sms') ? business.owner_phone : null, businessName: business.business_name, smsNumber: business.sms_number, customerPhone, customerMessage: incomingText, trigger: 'flagged by assistant', tier: 'heads_up' }).catch(() => {})
+      }
+    }
 
     // 🔒 PROTECTED — Deposit info auto-append. See PROTECTED_DECISIONS.md Entry 4.
     // Server-controlled append: any tool that needs to add exact text (deposit
@@ -1878,4 +2055,4 @@ async function handleIncomingMessage({ business, customerPhone, incomingText, me
   return finalResponse
 }
 
-module.exports = { handleIncomingMessage }
+module.exports = { handleIncomingMessage, _test: { resolveRequestedServices, detectEscalation, policyBlock } }

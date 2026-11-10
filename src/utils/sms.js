@@ -100,7 +100,10 @@ async function sendSMS(from, to, body, mediaUrls) {
     return await attempt(base)
   } catch (err) {
     console.error(`[SMS] Failed to send to ${to}:`, err.message)
-    return { success: false, error: err.message }
+    // 21610 = recipient has opted out at the carrier/Twilio level (STOP, or a
+    // word Twilio treats as STOP such as CANCEL). Callers use this to tell the
+    // owner the client can't be reached by text until they reply START.
+    return { success: false, error: err.message, code: err.code ? String(err.code) : null, blocked: String(err.code) === '21610' }
   }
 }
 
