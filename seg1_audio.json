@@ -1,5 +1,5 @@
 {
- "duration": 95.2,
+ "duration": 95.566667,
  "narration": [
   {
    "key": "intro",
@@ -7,31 +7,31 @@
   },
   {
    "key": "site",
-   "at": 11.09
+   "at": 11.275
   },
   {
    "key": "form",
-   "at": 17.79
+   "at": 17.416
   },
   {
    "key": "plan",
-   "at": 30.804
+   "at": 30.596
   },
   {
    "key": "verify",
-   "at": 43.369
+   "at": 43.218
   },
   {
    "key": "number",
-   "at": 52.712
+   "at": 52.368
   },
   {
    "key": "welcome",
-   "at": 68.701
+   "at": 68.435
   },
   {
    "key": "app",
-   "at": 76.522
+   "at": 76.936
   }
  ]
 }
