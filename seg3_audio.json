@@ -1,33 +1,33 @@
 {
- "duration": 72.533333,
+ "duration": 72.433333,
  "narration": [
   {
    "key": "intro",
-   "at": 3.786
+   "at": 3.755
   },
   {
    "key": "client",
-   "at": 10.968
+   "at": 10.939
   },
   {
    "key": "deposit",
-   "at": 21.349
+   "at": 21.32
   },
   {
    "key": "push",
-   "at": 31.488
+   "at": 31.46
   },
   {
    "key": "thread",
-   "at": 40.831
+   "at": 40.8
   },
   {
    "key": "schedule",
-   "at": 51.135
+   "at": 51.105
   },
   {
    "key": "outro",
-   "at": 62.398
+   "at": 62.367
   }
  ]
 }
