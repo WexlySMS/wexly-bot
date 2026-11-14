@@ -2810,7 +2810,7 @@ app.get('/public/profile-v2/:slug', async (req, res) => {
         .map(s => ({
         name: s.name, duration: s.duration_mins, price: s.price,
         // v215: the owner chooses per service whether the description shows and can add a photo.
-        description: s.show_description === false ? null : (s.description || null),
+        description: s.show_description === false ? null : (String(s.description || '').replace(/\s+/g, ' ').trim().slice(0, 240) || null),
         image: s.image_url || null,
         mode: s.booking_mode,
         deposit: s.deposit_amount || null, category: s.category || null
