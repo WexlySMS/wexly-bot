@@ -67,7 +67,8 @@ async function sendReviewRequests() {
     const { error: insErr } = await supabase.from('reviews').insert({ business_id: a.business_id, appointment_id: a.id, customer_phone: a.customer_phone, customer_name: a.customer_name, service_name: a.service_name, status: 'requested' })
     if (insErr) continue
     try {
-      await sendSMS(biz.sms_number, a.customer_phone, `Hi ${firstName(a.customer_name)}, thanks for coming in to ${biz.business_name}! How did we do today? Reply with a number from 1 to 5.`)
+      const isToday = date === new Date(now).toLocaleDateString('en-CA', { timeZone: tz })
+      await sendSMS(biz.sms_number, a.customer_phone, `Hi ${firstName(a.customer_name)}, thanks for coming in to ${biz.business_name}! How did we do${isToday ? ' today' : ''}? Reply with a number from 1 to 5.`)
       sent++
     } catch (e) { console.error('[Reviews] ask failed:', e.message) }
   }
@@ -116,8 +117,9 @@ async function handleCustomerReply(business, customerPhone, text) {
     await sendSMS(business.sms_number, customerPhone, `Thanks ${firstName(rv.customer_name)}! See you next time.`)
     return true
   }
-  if (BOOKING_WORDS.test(t) && t.length > 25) {
-    // Reads like a new request, not a review: close the review without words and let the model answer.
+  // v215: anything that reads like a request or a question is not a review
+  // ("can I book Friday?" used to be published as the client's review).
+  if (BOOKING_WORDS.test(t) || /\?\s*$/.test(t) || /^(hi|hey|hello)\b/i.test(t) || t.length < 4) {
     await supabase.from('reviews').update({ status: finalStatus }).eq('id', rv.id)
     return false
   }

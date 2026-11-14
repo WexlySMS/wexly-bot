@@ -186,6 +186,9 @@ function parseTipReply(text, { percentages, subtotalCents }) {
 async function startTipPrompt({ biz, customerName, customerPhone, lineItems, discountCents, notes, subtotalCents, taxCents, staffName, appointmentId, transactionId }) {
   if (!biz?.sms_number) throw new Error('No SMS number assigned to this business')
   if (!customerPhone || String(customerPhone).replace(/\D/g, '').length < 10) throw new Error('Customer has no valid phone number')
+  // v215: store the number the way Twilio will report the reply (+1XXXXXXXXXX),
+  // otherwise a dashboard-typed "760-604-1791" never matches and the tip answer is lost.
+  customerPhone = require('../utils/phone').toE164(customerPhone) || customerPhone
 
   const percentages = normalizePercentages(biz.tip_percentages)
   const preTipTotalCents = lineItems.reduce((s, i) => s + Math.round(i.amount), 0) - Math.round(discountCents || 0)
@@ -194,7 +197,7 @@ async function startTipPrompt({ biz, customerName, customerPhone, lineItems, dis
   // Only one live prompt per customer per business. Cancel any stale one.
   await supabase.from('pending_tip_invoices')
     .update({ status: 'cancelled', resolved_at: new Date().toISOString() })
-    .eq('business_id', biz.id).eq('customer_phone', customerPhone).eq('status', 'awaiting')
+    .eq('business_id', biz.id).in('customer_phone', require('../utils/phone').phoneVariants(customerPhone)).eq('status', 'awaiting')
 
   const payload = { customerName, lineItems, discountCents: Math.round(discountCents || 0), notes: notes || '', subtotalCents: base,
     taxCents: Math.round(taxCents || 0), staffName: staffName || null, appointmentId: appointmentId || null, transactionId: transactionId || null,
@@ -297,7 +300,7 @@ async function checkPendingTipReply(business, customerPhone, incomingText) {
   let row
   try {
     const { data, error } = await supabase.from('pending_tip_invoices')
-      .select('*').eq('business_id', business.id).eq('customer_phone', customerPhone).eq('status', 'awaiting')
+      .select('*').eq('business_id', business.id).in('customer_phone', require('../utils/phone').phoneVariants(customerPhone)).eq('status', 'awaiting')
       .order('created_at', { ascending: false }).limit(1).maybeSingle()
     if (error) { console.error('[Tip] lookup failed (table missing?):', error.message); return { handled: false } }
     row = data

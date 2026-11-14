@@ -632,7 +632,16 @@ router.post('/sms', validateTwilio, async (req, res) => {
           const first = (dep.customer_name || 'The client').split(' ')[0]
           const amt = dep.deposit_amount ? ` $${(dep.deposit_amount / 100).toFixed(0)}` : ''
           await sendSMS(toNumber, customerPhone, `Thanks ${first}! I've let ${business.business_name} know. You'll get a confirmation text as soon as they see the${amt} deposit.`)
-          if (business.owner_phone) await sendSMS(toNumber, business.owner_phone, `${dep.customer_name || customerPhone} says they sent the${amt} deposit for ${dep.service_name || 'their appointment'} on ${dep.appointment_date}${dep.appointment_time ? ' at ' + String(dep.appointment_time).slice(0, 5) : ''}. Check your payments, then reply "confirm ${first}" to lock it in or "cancel ${first}" if it never came.`).catch(() => {})
+          const { formatDate: fD, formatTime: fT } = require('../utils/dateHelpers')
+          if (business.owner_phone) await sendSMS(toNumber, business.owner_phone, `${dep.customer_name || customerPhone} says they sent the${amt} deposit for ${dep.service_name || 'their appointment'} on ${fD(dep.appointment_date)}${dep.appointment_time ? ' at ' + fT(dep.appointment_time) : ''}. Check your payments, then reply "confirm ${first}" to lock it in or "cancel ${first}" if it never came.`).catch(() => {})
+          // Leave the exchange in the client's thread so their next message makes sense to the bot.
+          try {
+            const { data: sess } = await sbDep.from('conversation_sessions').select('messages, customer_phone').eq('business_id', business.id).in('customer_phone', phoneVariants(customerPhone)).limit(1).maybeSingle()
+            const msgs = Array.isArray(sess?.messages) ? sess.messages : []
+            msgs.push({ role: 'user', content: incomingText, timestamp: new Date().toISOString() })
+            msgs.push({ role: 'assistant', content: `[Client reported paying the${amt} deposit for ${dep.service_name || 'their appointment'} on ${fD(dep.appointment_date)}. The owner was asked to confirm; the booking is held for 24 hours meanwhile. If they ask, it is confirmed once the owner sees the payment.]`, timestamp: new Date().toISOString() })
+            await sbDep.from('conversation_sessions').upsert({ business_id: business.id, customer_phone: sess?.customer_phone || customerPhone, messages: msgs.slice(-60), last_activity: new Date().toISOString() }, { onConflict: 'business_id,customer_phone' })
+          } catch (e) { console.error('[Deposit] thread note failed:', e.message) }
           console.log(`[Deposit] manual deposit reported by ${customerPhone} for appt ${dep.id}`)
           return
         }

@@ -346,3 +346,8 @@ Infrastructure
 ## 88. Services on the booking page: photo and description are the owner's call (v215)
 - services.description (existing), services.image_url and services.show_description (service-booking-page-fields.sql) are edited per service in Settings > Services ("On your booking page"). The public profile returns description only when show_description is not false, and image as image_url. book.html renders a 76px photo beside the service when there is one and the description under the meta line. Photos upload to the profile-photos bucket under <business>/services/. The dashboard sends image_url and show_description only when set, so an account whose database has not run the SQL still saves services.
 - Photos are optimized in the browser before upload (dashboard wxOptimizeImage): service 800x800 center crop, logo 512 max (PNG keeps transparency), cover long edge 1800, gallery long edge 1400, EXIF orientation applied, JPEG 0.84 to 0.9, white matte. Storage never receives an original. Descriptions are capped at 240 characters server-side and shown two lines deep with a More toggle on the page. The owner picks content; the layout is fixed.
+
+## 89. Client-side sweeps (v215)
+- A client's "PAID" leaves a note in their thread and the owner alert is formatted (Thursday, November 19 at 2:00 PM).
+- A review comment is only recorded when it reads like one: booking words, a question mark, a greeting or fewer than 4 characters close the ask silently and go to the model. "Can I book Friday?" was being published as a review.
+- The tip prompt stores the client's number as E.164 and matches replies on every variant, so a number typed in the dashboard still gets its tip answer recognized.
