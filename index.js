@@ -2809,7 +2809,10 @@ app.get('/public/profile-v2/:slug', async (req, res) => {
         .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
         .map(s => ({
         name: s.name, duration: s.duration_mins, price: s.price,
-        description: s.description, mode: s.booking_mode,
+        // v215: the owner chooses per service whether the description shows and can add a photo.
+        description: s.show_description === false ? null : (s.description || null),
+        image: s.image_url || null,
+        mode: s.booking_mode,
         deposit: s.deposit_amount || null, category: s.category || null
       })),
       bundles: (bundles.data || []).map(b => ({
