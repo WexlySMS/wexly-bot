@@ -414,7 +414,8 @@ function stepNeeded(biz, services, step, ctx = {}) {
   const hasDepositMethod = (biz.stripe_account_connected && biz.stripe_account_id) || /^https?:\/\//i.test(String(biz.payment_link || ''))
   if (step === 'import_mode') return services.length > 0 && !ob.import_mode
   if (step === 'deposits') return services.length > 0
-  if (step === 'deposit_method') return anyDeposit && !hasDepositMethod
+  // Counted from the first question (so the "(n of N)" total never grows mid-setup); dropped once deposits are decided and none are set.
+  if (step === 'deposit_method') return !hasDepositMethod && (anyDeposit || !stepDone(ob, 'deposits'))
   if (step === 'hours') return !hasHours
   if (step === 'staff') return !hasStaff
   if (step === 'bookings') return !ob.calendar_feed && !(ctx.importedCount > 0)
@@ -501,6 +502,20 @@ async function advanceSetup(biz, fromStep) {
 function prettyNumber(p) { const d = String(p || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : (p || 'your Wexly number') }
 
 // Parse "Balayage $50, Color $40" / "all $25" / "$25 for everything" into [{name, amount}] or {all: amount}
+// Owners say "facials", "injectables", "all color services": match on the service name, then its
+// category, then the singular keyword against both. Returns the matching service rows.
+function matchServices(svcs, phrase) {
+  const w = String(phrase || '').toLowerCase().replace(/\b(all|my|the|every|services?|appointments?)\b/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!w) return []
+  const name = sv => String(sv.name || '').toLowerCase(), cat = sv => String(sv.category || '').toLowerCase()
+  let hits = svcs.filter(sv => name(sv) === w || name(sv).includes(w) || w.includes(name(sv)))
+  if (hits.length) return hits
+  hits = svcs.filter(sv => cat(sv) && (cat(sv) === w || cat(sv).includes(w) || w.includes(cat(sv))))
+  if (hits.length) return hits
+  const stem = w.replace(/(ies)$/, 'y').replace(/(sses|xes|ches|shes)$/, m => m.slice(0, -2)).replace(/s$/, '')
+  if (stem.length < 3) return []
+  return svcs.filter(sv => name(sv).includes(stem) || cat(sv).includes(stem))
+}
 function parseDeposits(text) {
   const t = String(text || '').trim()
   const allM = t.match(/\b(all|every(?:thing| service| one)?)\b[^$\d]*\$?\s*(\d+(?:\.\d+)?)/i) || t.match(/\$?\s*(\d+(?:\.\d+)?)\s*(?:for|on)\s+(?:all|every(?:thing| service)?)/i)
@@ -671,7 +686,7 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
     // "no", "no deposits", "I don't take deposits", "not right now", "none of them"
     if (!hasAmount && (NO_RE.test(t) || /\b(no deposits?|don'?t (take|do|need|require|want)|not (right )?now|not yet|none|nothing|later|maybe later)\b/i.test(t))) {
       await say(`No deposits. You can add one any time, like "Balayage needs a $50 deposit".`)
-      await setPending(biz, null, { deposits_at: new Date().toISOString() })
+      await setPending(biz, null, { deposits_at: new Date().toISOString(), deposit_method_at: new Date().toISOString(), deposit_method_skipped: true })
       await advanceSetup(biz, 'deposits'); return '__sent__'
     }
     // "yes", "yes some do", "a few", "all of them" without an amount → ask which and how much
@@ -683,7 +698,7 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
     }
     const parsed = parseDeposits(t)
     if (!parsed) return null  // let the model handle it; question stays open and gets re-asked
-    const { data: services } = await supabase.from('services').select('id, name').eq('business_id', biz.id).neq('active', false)
+    const { data: services } = await supabase.from('services').select('id, name, category').eq('business_id', biz.id).neq('active', false)
     const svcs = services || []
     const applied = [], missed = []
     if (parsed.all) {
@@ -691,8 +706,7 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
       applied.push(`all ${svcs.length} services $${parsed.all}`)
     } else {
       for (const it of parsed.items) {
-        const w = it.name.toLowerCase()
-        const hits = svcs.filter(sv => sv.name.toLowerCase() === w || sv.name.toLowerCase().includes(w) || w.includes(sv.name.toLowerCase()))
+        const hits = matchServices(svcs, it.name)
         if (!hits.length) { missed.push(it.name); continue }
         await supabase.from('services').update({ deposit_amount: String(it.amount) }).in('id', hits.map(h => h.id))
         applied.push(`${hits.map(h => h.name).join(', ')} $${it.amount}`)

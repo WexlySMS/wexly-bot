@@ -306,3 +306,7 @@ Owner-side (ownerCommands)
 Infrastructure
 - SIGTERM/SIGINT: webhook.drainForShutdown fires every queued (debounced) client conversation and waits up to 20s for replies before exit; index.js closes the server after. Deploys no longer eat texts.
 - Menu photos: siteImporter.importFromImages (vision, same save_import schema/clean) runs when an owner texts a photo of their service list during setup; nothing readable → honest fallback text offering screenshots/typed list/HELP (also for JavaScript-built sites the fetcher can't read). Brandon still gets the human-route email.
+
+## 80. Setup counter never grows; deposits match by category (v209)
+- The "(n of N)" setup label counts the deposit-method question from the first question (it is needed until deposits are decided), and a NO to deposits marks deposit_method skipped so the total stays put. Before: "(2 of 5)" became "(3 of 6)" after a YES, which read like a bug at the moment the owner is deciding to trust the flow.
+- Deposit answers like "$25 for facials, $50 for injectables" match on service name, then category, then the singular keyword against both (matchServices). Owners talk in categories; only exact names matched before.
