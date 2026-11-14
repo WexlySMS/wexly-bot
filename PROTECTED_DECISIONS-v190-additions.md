@@ -351,3 +351,7 @@ Infrastructure
 - A client's "PAID" leaves a note in their thread and the owner alert is formatted (Thursday, November 19 at 2:00 PM).
 - A review comment is only recorded when it reads like one: booking words, a question mark, a greeting or fewer than 4 characters close the ask silently and go to the model. "Can I book Friday?" was being published as a review.
 - The tip prompt stores the client's number as E.164 and matches replies on every variant, so a number typed in the dashboard still gets its tip answer recognized.
+
+## 90. Tests run on every push and every night (v215)
+- tests/*.test.js are contract tests that drive the real handlers (ownerCommands, approval, deposit helper, dateHelpers, phone, payments) against in-memory Supabase and SMS fakes: no model, no network, no database. `npm test` runs them; .github/workflows/test.yml runs them on every push to main and nightly at 3:17am Pacific. Nightly also POSTs /test/run on Render (the LLM-driven end-to-end suite) when the WEXLY_ADMIN_KEY repository secret is set and fails the workflow on any failing case. GitHub emails the repo owner when a workflow fails.
+- When a bug is fixed, add the case that would have caught it to tests/. A date or time in a client-facing text that is not formatDate/formatTime fails the suite.

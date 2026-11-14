@@ -1,0 +1,39 @@
+name: Wexly checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 11 * * *'   # 3:17am Pacific, every day
+  workflow_dispatch:
+
+jobs:
+  contract-tests:
+    name: Contract tests (no network)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+
+  live-suite:
+    name: Live suite on Render (nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: contract-tests
+    steps:
+      - name: Run /test/run against production
+        env:
+          KEY: ${{ secrets.WEXLY_ADMIN_KEY }}
+          BOT_URL: ${{ vars.BOT_URL || 'https://wexly-bot.onrender.com' }}
+        run: |
+          if [ -z "$KEY" ]; then echo "WEXLY_ADMIN_KEY secret not set; skipping live suite"; exit 0; fi
+          out=$(curl -sS --max-time 600 -X POST "$BOT_URL/test/run" -H "x-admin-key: $KEY")
+          echo "$out" | head -c 20000
+          fails=$(echo "$out" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const r=j.all_results||j.results||[];if(j.error){console.error("FAIL:",j.error);console.log(1);return}const f=r.filter(x=>x.status==="fail");console.log(f.length);f.forEach(x=>console.error("FAIL:",x.name,"-",x.error))}catch(e){console.log("parse-error")}})')
+          if [ "$fails" != "0" ]; then echo "::error::$fails live test(s) failed"; exit 1; fi

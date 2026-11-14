@@ -1,11 +1,12 @@
 {
   "name": "wexly-bot",
   "version": "2.0.0",
-  "description": "AI-powered SMS booking bot — multi-tenant",
+  "description": "AI-powered SMS booking bot \u2014 multi-tenant",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "test": "node --test 'tests/*.test.js'"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
