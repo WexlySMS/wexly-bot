@@ -2402,6 +2402,45 @@ app.post('/dashboard/send-sms', requireBusinessAuth, async (req, res) => {
   }
 })
 
+// v215: approve / deny a booking request. The dashboard's Approve and Decline
+// buttons call these so every approval goes through src/bot/approval.js
+// (confirm + deposit if the service has one + plain-English text to the client).
+// Body accepts camelCase or snake_case like the other owner-action routes.
+app.post('/owner-action/approve-request', requireBusinessAuth, async (req, res) => {
+  try {
+    const appointmentId = req.body.appointmentId || req.body.appointment_id
+    const businessId = req.body.businessId || req.body.business_id
+    if (!appointmentId || !businessId) return res.status(400).json({ error: 'Missing appointmentId/businessId' })
+    const { data: appt } = await supabase.from('appointments').select('*').eq('id', appointmentId).eq('business_id', businessId).maybeSingle()
+    if (!appt) return res.status(404).json({ error: 'Appointment not found' })
+    const { data: biz } = await supabase.from('businesses').select('*').eq('id', businessId).maybeSingle()
+    if (!biz) return res.status(404).json({ error: 'Business not found' })
+    const r = await require('./src/bot/approval').approveAppointment(biz, appt)
+    if (!r.ok) return res.status(409).json({ error: r.reason === 'not_pending' ? `Already ${r.status}` : 'Not found', ...r })
+    res.json({ success: true, ...r })
+  } catch (err) {
+    console.error('[Approve] Error:', err.message)
+    res.status(500).json({ error: err.message })
+  }
+})
+app.post('/owner-action/deny-request', requireBusinessAuth, async (req, res) => {
+  try {
+    const appointmentId = req.body.appointmentId || req.body.appointment_id
+    const businessId = req.body.businessId || req.body.business_id
+    if (!appointmentId || !businessId) return res.status(400).json({ error: 'Missing appointmentId/businessId' })
+    const { data: appt } = await supabase.from('appointments').select('*').eq('id', appointmentId).eq('business_id', businessId).maybeSingle()
+    if (!appt) return res.status(404).json({ error: 'Appointment not found' })
+    const { data: biz } = await supabase.from('businesses').select('*').eq('id', businessId).maybeSingle()
+    if (!biz) return res.status(404).json({ error: 'Business not found' })
+    const r = await require('./src/bot/approval').denyAppointment(biz, appt, req.body.reason)
+    if (!r.ok) return res.status(409).json({ error: r.reason === 'not_pending' ? `Already ${r.status}` : 'Not found', ...r })
+    res.json({ success: true, ...r })
+  } catch (err) {
+    console.error('[Deny] Error:', err.message)
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 🔒 PROTECTED — See PROTECTED_DECISIONS.md Entry 12 (Send-quote URL + media proxy)
 // 🔒 Route MUST stay at /owner-action/send-quote — dashboard calls this URL.
@@ -3851,7 +3890,7 @@ const server = app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════╗
   ║   Wexly SMS Bot v2.0                 ║
-  ║   BUILD: v214 (held slots everywhere, blocked-day window)║
+  ║   BUILD: v215 (owner commands audit, one approval path)║
   ║   Running on port ${PORT}               ║
   ║                                      ║
   ║   SMS:    POST /webhook/sms          ║

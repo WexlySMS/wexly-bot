@@ -1746,8 +1746,8 @@ async function handleIncomingMessage({ business, customerPhone, incomingText, me
 
       const firstName = quotedAppt.customer_name?.split(' ')[0] || 'there'
       const baseReply = depositResult.depositCreated
-        ? `Great news, ${firstName}! Just need to lock in your ${quotedAppt.service_name} on ${quotedAppt.appointment_date}${quotedAppt.appointment_time ? ' at ' + quotedAppt.appointment_time : ''} with a deposit.`
-        : `Amazing! You're all booked for ${quotedAppt.service_name} on ${quotedAppt.appointment_date}${quotedAppt.appointment_time ? ' at ' + quotedAppt.appointment_time : ''}. We can't wait to see you! 😊`
+        ? `Great news, ${firstName}! Just need to lock in your ${quotedAppt.service_name} on ${formatDate(quotedAppt.appointment_date)}${quotedAppt.appointment_time ? ' at ' + formatTime(String(quotedAppt.appointment_time).slice(0, 5)) : ''} with a deposit.`
+        : `Amazing! You're all booked for ${quotedAppt.service_name} on ${formatDate(quotedAppt.appointment_date)}${quotedAppt.appointment_time ? ' at ' + formatTime(String(quotedAppt.appointment_time).slice(0, 5)) : ''}. We can't wait to see you! 😊`
 
       // 🔒 PROTECTED — Append meeting link for virtual businesses (see Entry 15).
       // Same guarantee as the create_appointment flow: server-controlled append
@@ -2070,4 +2070,4 @@ async function handleIncomingMessage({ business, customerPhone, incomingText, me
   return finalResponse
 }
 
-module.exports = { handleIncomingMessage, _test: { resolveRequestedServices, detectEscalation, policyBlock } }
+module.exports = { handleIncomingMessage, tryCreateDepositForAppointment, _test: { resolveRequestedServices, detectEscalation, policyBlock } }

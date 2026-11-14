@@ -196,7 +196,8 @@ const OWNER_TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        customer_name: { type: 'string', description: 'First name or full name of the customer whose request to deny' }
+        customer_name: { type: 'string', description: 'First name or full name of the customer whose request to deny' },
+        reason: { type: 'string', description: 'Optional short reason to pass on to the client, e.g. "fully booked that week". Omit if the owner gave none.' }
       },
       required: ['customer_name']
     }
@@ -470,6 +471,17 @@ function localToUtc(local, tz) {
   return new Date(guess)
 }
 
+// v215: one lookup for "cancel/move <name>": live statuses only, upcoming only
+// unless the owner named a specific day, soonest first.
+const LIVE_STATUSES = ['pending', 'confirmed', 'deposit_pending', 'pending_approval', 'quote_sent']
+function liveAppointmentsFor(business, input, today) {
+  let query = supabase.from('appointments').select('*').eq('business_id', business.id).in('status', LIVE_STATUSES)
+  if (input.date && /^\d{4}-\d{2}-\d{2}$/.test(String(input.date))) query = query.eq('appointment_date', input.date)
+  else query = query.gte('appointment_date', today)
+  if (input.customer_name) query = query.ilike('customer_name', `%${String(input.customer_name).trim()}%`)
+  return query.order('appointment_date').order('appointment_time').limit(5)
+}
+
 async function executeOwnerTool(toolName, input, business) {
   const tz = business.timezone || 'America/New_York'
   const today = new Date().toLocaleDateString('en-CA', { timeZone: tz })
@@ -517,9 +529,28 @@ async function executeOwnerTool(toolName, input, business) {
       }
 
       const isPartialDay = input.start_time && input.end_time
-      const dateRange = startDate === endDate ? startDate : `${startDate} to ${endDate}`
-      const timeRange = isPartialDay ? ` from ${input.start_time} to ${input.end_time}` : ' (full day)'
-      return `✅ Done! Blocked ${dateRange}${timeRange}. Customers won't be able to book during those times.`
+      const dateRange = startDate === endDate ? formatDate(startDate) : `${formatDate(startDate)} to ${formatDate(endDate)}`
+      const timeRange = isPartialDay ? ` from ${formatTime(input.start_time)} to ${formatTime(input.end_time)}` : ' (full day)'
+      // v215: blocking a day does not touch bookings already on it. Tell the owner
+      // what is sitting there so they can say "cancel everything Friday" if they mean to.
+      let onBooks = ''
+      try {
+        let q = supabase.from('appointments').select('customer_name, appointment_date, appointment_time, service_name')
+          .eq('business_id', business.id).in('appointment_date', dates)
+          .in('status', ['pending', 'confirmed', 'deposit_pending', 'pending_approval', 'quote_sent'])
+          .order('appointment_date').order('appointment_time')
+        const { data: hit } = await q
+        const inWindow = (hit || []).filter(a => {
+          if (!isPartialDay) return true
+          const t = String(a.appointment_time || '').slice(0, 5)
+          return t >= String(input.start_time).slice(0, 5) && t < String(input.end_time).slice(0, 5)
+        })
+        if (inWindow.length) {
+          const list = inWindow.slice(0, 8).map(a => `${a.customer_name} (${formatDate(a.appointment_date)} ${formatTime(a.appointment_time)})`).join(', ')
+          onBooks = ` Heads up: ${inWindow.length} booking${inWindow.length === 1 ? ' is' : 's are'} already on the books then: ${list}${inWindow.length > 8 ? ', and more' : ''}. They stay as they are unless you tell me to cancel or move them.`
+        }
+      } catch (e) { console.error('[Owner] block_dates lookup failed:', e.message) }
+      return `✅ Done! Blocked ${dateRange}${timeRange}. Clients can't book during that time.${onBooks}`
     }
 
     case 'get_schedule': {
@@ -543,36 +574,34 @@ async function executeOwnerTool(toolName, input, business) {
         .neq('status', 'cancelled')
         .order('appointment_time')
 
-      // Also get all pending approvals (any date)
+      // Also get upcoming pending approvals (any date from today on)
       const { data: allPending } = await supabase
         .from('appointments')
         .select('*')
         .eq('business_id', business.id)
         .eq('status', 'pending_approval')
+        .gte('appointment_date', today)
         .order('appointment_date')
 
-      if (!appts?.length && !allPending?.length) return `📅 No appointments on ${targetDate} and no pending requests.`
+      const dayLabel = formatDate(targetDate)
+      if (!appts?.length && !allPending?.length) return `📅 No appointments on ${dayLabel} and no pending requests.`
 
       var result = ''
 
       if (appts?.length) {
+        const statusTag = { pending_approval: ' ⏳ needs your approval', quote_sent: ' (quote sent)', deposit_pending: ' (waiting on deposit)', no_show: ' (no-show)', completed: ' (done)' }
         const list = appts.map(a => {
-          const time = a.appointment_time ? a.appointment_time.slice(0, 5) : '?'
-          const [h, m] = time.split(':')
-          const hr = parseInt(h)
-          const ampm = hr >= 12 ? 'pm' : 'am'
-          const displayHr = hr > 12 ? hr - 12 : hr || 12
-          const status = a.status === 'pending_approval' ? ' ⏳ PENDING' : ''
-          return `• ${displayHr}:${m}${ampm} — ${a.customer_name} (${a.service_name || 'Appointment'})${status}`
+          const time = a.appointment_time ? formatTime(a.appointment_time) : '?'
+          return `• ${time}: ${a.customer_name} (${a.service_name || 'Appointment'})${a.staff_name ? ` with ${a.staff_name}` : ''}${statusTag[a.status] || ''}`
         }).join('\n')
-        result += `📅 Schedule for ${targetDate}:\n${list}\nTotal: ${appts.length}`
+        result += `📅 ${dayLabel}:\n${list}\nTotal: ${appts.length}`
       } else {
-        result += `📅 No appointments on ${targetDate}.`
+        result += `📅 No appointments on ${dayLabel}.`
       }
 
       if (allPending?.length) {
         const pendList = allPending.map(a => {
-          return `• ${a.appointment_date} — ${a.customer_name} (${a.service_name || 'Appointment'})`
+          return `• ${formatDate(a.appointment_date)}${a.appointment_time ? ` ${formatTime(a.appointment_time)}` : ''}: ${a.customer_name} (${a.service_name || 'Appointment'})`
         }).join('\n')
         result += `\n\n⏳ ${allPending.length} pending approval${allPending.length > 1 ? 's' : ''}:\n${pendList}\nReply "Approve [name]" or "Deny [name]"`
       }
@@ -598,21 +627,15 @@ async function executeOwnerTool(toolName, input, business) {
     }
 
     case 'cancel_appointment': {
-      let query = supabase.from('appointments')
-        .select('*')
-        .eq('business_id', business.id)
-        .neq('status', 'cancelled')
+      // v215: only live, upcoming bookings. Without this "cancel Jess" could hit a
+      // completed appointment from last month and leave next week's untouched.
+      const { data: appts } = await liveAppointmentsFor(business, input, today)
 
-      if (input.date) query = query.eq('appointment_date', input.date)
-      if (input.customer_name) query = query.ilike('customer_name', `%${input.customer_name}%`)
-
-      const { data: appts } = await query.order('appointment_date').limit(5)
-
-      if (!appts?.length) return `Couldn't find that appointment. Try being more specific with the name or date.`
+      if (!appts?.length) return `I don't see an upcoming appointment ${input.customer_name ? `for ${input.customer_name}` : 'like that'}${input.date ? ` on ${formatDate(input.date)}` : ''}. Try the name or day again.`
 
       if (appts.length > 1) {
-        const list = appts.map(a => `• ${a.appointment_date} at ${a.appointment_time?.slice(0,5)} — ${a.customer_name}`).join('\n')
-        return `Found ${appts.length} appointments. Which one?\n${list}\n\nReply with the exact date and name to cancel.`
+        const list = appts.map(a => `• ${a.customer_name}: ${formatDate(a.appointment_date)} at ${formatTime(a.appointment_time)} (${a.service_name || 'Appointment'})`).join('\n')
+        return `Found ${appts.length} appointments. Which one?\n${list}\n\nReply with the name and day to cancel.`
       }
 
       const appt = appts[0]
@@ -632,21 +655,13 @@ async function executeOwnerTool(toolName, input, business) {
     }
 
     case 'reschedule_appointment': {
-      let query = supabase.from('appointments')
-        .select('*')
-        .eq('business_id', business.id)
-        .neq('status', 'cancelled')
+      const { data: appts } = await liveAppointmentsFor(business, input, today)
 
-      if (input.date) query = query.eq('appointment_date', input.date)
-      if (input.customer_name) query = query.ilike('customer_name', `%${input.customer_name}%`)
-
-      const { data: appts } = await query.order('appointment_date').limit(5)
-
-      if (!appts?.length) return `Couldn't find that appointment. Try being more specific with the name or date.`
+      if (!appts?.length) return `I don't see an upcoming appointment ${input.customer_name ? `for ${input.customer_name}` : 'like that'}${input.date ? ` on ${formatDate(input.date)}` : ''}. Try the name or day again.`
 
       if (appts.length > 1) {
-        const list = appts.map(a => `• ${a.appointment_date} at ${a.appointment_time?.slice(0,5)} — ${a.customer_name}`).join('\n')
-        return `Found ${appts.length} appointments. Which one?\n${list}\n\nReply with the exact date and name to reschedule.`
+        const list = appts.map(a => `• ${a.customer_name}: ${formatDate(a.appointment_date)} at ${formatTime(a.appointment_time)} (${a.service_name || 'Appointment'})`).join('\n')
+        return `Found ${appts.length} appointments. Which one?\n${list}\n\nReply with the name and day to move.`
       }
 
       const appt = appts[0]
@@ -679,11 +694,12 @@ async function executeOwnerTool(toolName, input, business) {
         const { sendSMS } = require('../utils/sms')
         const firstName = (appt.customer_name || '').split(' ')[0] || 'there'
         const reason = input.reason ? ` due to ${input.reason}` : ''
-        const msg = `Hi ${firstName}! We need to reschedule your ${appt.service_name || 'appointment'} on ${appt.appointment_date}${reason}. Text us back with a new date and time that works for you and we'll get you rebooked right away!`
-        await sendSMS(business.sms_number, appt.customer_phone, msg)
+        const msg = `Hi ${firstName}! We need to reschedule your ${appt.service_name || 'appointment'} on ${formatDate(appt.appointment_date)} at ${formatTime(appt.appointment_time)}${reason}. Text us back with a new day and time that works for you and we'll get you rebooked right away!`
+        const r = await sendSMS(business.sms_number, appt.customer_phone, msg)
+        if (r?.success) await noteClientThread(business.id, appt.customer_phone, `[Cancelled by the owner, needs rebooking] ${appt.service_name || 'Appointment'} on ${formatDate(appt.appointment_date)} at ${formatTime(appt.appointment_time)}${reason}. Client was asked to pick a new day and time; book whatever they reply with.`)
       }
 
-      return `✅ Rescheduled ${appt.customer_name}'s ${appt.service_name || 'appointment'} on ${appt.appointment_date} at ${appt.appointment_time?.slice(0,5)}.\n\nOld appointment cancelled. Customer has been texted to pick a new date and time.`
+      return `✅ ${appt.customer_name}'s ${appt.service_name || 'appointment'} on ${formatDate(appt.appointment_date)} at ${formatTime(appt.appointment_time)} is cancelled and they've been texted to pick a new time.`
     }
 
     case 'send_group_message': {
@@ -737,38 +753,36 @@ async function executeOwnerTool(toolName, input, business) {
       const tz = business.timezone || 'America/New_York'
       const today = new Date().toLocaleDateString('en-CA', { timeZone: tz })
 
-      // Get remaining appointments today
-      const now = new Date()
-      const currentTime = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`
+      // Remaining appointments today, in the BUSINESS timezone (the server runs
+      // in UTC, so new Date().getHours() was hours off and found nothing).
+      const currentTime = new Date().toLocaleTimeString('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
 
       const { data: appts } = await supabase
         .from('appointments')
         .select('*')
         .eq('business_id', business.id)
         .eq('appointment_date', today)
-        .eq('status', 'confirmed')
+        .in('status', ['pending', 'confirmed', 'deposit_pending', 'pending_approval', 'quote_sent'])
         .gte('appointment_time', currentTime)
         .order('appointment_time')
 
-      if (!appts?.length) return `No upcoming appointments today to notify.`
+      if (!appts?.length) return `No more appointments today (it's ${formatTime(currentTime)} your time), so there's nobody to notify.`
 
       const { sendSMS } = require('../utils/sms')
       let notified = 0
 
       for (const appt of appts) {
         const firstName = appt.customer_name?.split(' ')[0] || 'there'
-        const [h, m] = (appt.appointment_time || '00:00').split(':')
-        const hr = parseInt(h)
-        const ampm = hr >= 12 ? 'pm' : 'am'
-        const displayHr = hr > 12 ? hr - 12 : hr || 12
-        const timeStr = `${displayHr}:${m}${ampm}`
+        const timeStr = formatTime(appt.appointment_time)
+        if (!appt.customer_phone || String(appt.customer_phone).replace(/\D/g, '').length < 10) continue
 
         const msg = input.message
-          ? `Hey ${firstName}! Quick heads up — ${input.message} We'll see you soon!`
-          : `Hey ${firstName}! Quick heads up — we're running about ${minutes} minutes behind today. Your ${timeStr} appointment is still on, just slightly delayed. Thank you for your patience! 🙏`
+          ? `Hey ${firstName}! Quick heads up from ${business.business_name}: ${String(input.message).trim()} We'll see you soon!`
+          : `Hey ${firstName}! Quick heads up from ${business.business_name}: we're running about ${minutes} minutes behind today. Your ${timeStr} appointment is still on, just slightly delayed. Thank you for your patience! 🙏`
 
         try {
-          await sendSMS(business.sms_number, appt.customer_phone, msg)
+          const r = await sendSMS(business.sms_number, appt.customer_phone, msg)
+          if (!r?.success) continue
           notified++
           await new Promise(r => setTimeout(r, 300))
         } catch (err) {
@@ -776,7 +790,7 @@ async function executeOwnerTool(toolName, input, business) {
         }
       }
 
-      return `✅ Done! Notified ${notified} customer${notified !== 1 ? 's' : ''} that you're running ${minutes} minutes late.`
+      return `✅ Done! Notified ${notified} of ${appts.length} remaining client${appts.length !== 1 ? 's' : ''} that you're running ${minutes} minutes late.${notified < appts.length ? ' The rest have no number on file or opted out.' : ''}`
     }
 
     case 'reschedule_all': {
@@ -793,7 +807,7 @@ async function executeOwnerTool(toolName, input, business) {
         .order('appointment_time')
 
       if (!appts?.length) {
-        return `No appointments found on ${targetDate} — nothing to reschedule.`
+        return `No appointments on ${formatDate(targetDate)}, so nothing to reschedule. Want me to block the day anyway?`
       }
 
       // 2. Block the date
@@ -814,18 +828,16 @@ async function executeOwnerTool(toolName, input, business) {
           .update({ status: 'cancelled' })
           .eq('id', appt.id)
 
-        // Format their time nicely
-        const [h, m] = (appt.appointment_time || '00:00').split(':')
-        const hr = parseInt(h)
-        const ampm = hr >= 12 ? 'pm' : 'am'
-        const displayHr = hr > 12 ? hr - 12 : hr || 12
-        const timeStr = `${displayHr}:${m}${ampm}`
+        const timeStr = formatTime(appt.appointment_time)
+        if (!appt.customer_phone || String(appt.customer_phone).replace(/\D/g, '').length < 10) { failed.push(`${appt.customer_name} (no number)`); continue }
 
         // Text the customer
-        const msg = `Hi ${appt.customer_name?.split(' ')[0] || 'there'}! Unfortunately ${business.business_name} needs to reschedule your ${appt.service_name || 'appointment'} on ${targetDate} at ${timeStr} due to ${reason}. We're sorry for the inconvenience! Reply here anytime to pick a new time and we'll get you rebooked right away 😊`
+        const msg = `Hi ${appt.customer_name?.split(' ')[0] || 'there'}! Unfortunately ${business.business_name} needs to reschedule your ${appt.service_name || 'appointment'} on ${formatDate(targetDate)} at ${timeStr} due to ${reason}. We're sorry for the inconvenience! Reply here anytime to pick a new time and we'll get you rebooked right away 😊`
 
         try {
-          await sendSMS(business.sms_number, appt.customer_phone, msg)
+          const r = await sendSMS(business.sms_number, appt.customer_phone, msg)
+          if (!r?.success) { failed.push(appt.customer_name); continue }
+          await noteClientThread(business.id, appt.customer_phone, `[Cancelled by the owner, needs rebooking] ${appt.service_name || 'Appointment'} on ${formatDate(targetDate)} at ${timeStr} (${reason}). Client was asked to pick a new day and time; book whatever they reply with.`)
           notified++
           // Small delay to avoid rate limits
           await new Promise(r => setTimeout(r, 300))
@@ -835,8 +847,8 @@ async function executeOwnerTool(toolName, input, business) {
         }
       }
 
-      let reply = `✅ Done! Cancelled ${appts.length} appointment${appts.length !== 1 ? 's' : ''} and notified ${notified} customer${notified !== 1 ? 's' : ''} on ${targetDate}. They'll be rebooked automatically as they reply.`
-      if (failed.length) reply += `\n\n⚠️ Could not reach: ${failed.join(', ')}`
+      let reply = `✅ Done! ${formatDate(targetDate)} is blocked. Cancelled ${appts.length} appointment${appts.length !== 1 ? 's' : ''} and texted ${notified} client${notified !== 1 ? 's' : ''}. I'll rebook them as they reply.`
+      if (failed.length) reply += `\n\n⚠️ Could not reach: ${failed.join(', ')}. Please let them know another way.`
 
       return reply
     }
@@ -852,9 +864,9 @@ async function executeOwnerTool(toolName, input, business) {
       if (!blocked?.length) return `No blocked dates coming up. All clear! 🟢`
 
       const list = blocked.map(b => {
-        const time = b.start_time ? ` (${b.start_time}–${b.end_time})` : ' (full day)'
-        const reason = b.reason ? ` — ${b.reason}` : ''
-        return `• ${b.blocked_date}${time}${reason}`
+        const time = b.start_time ? ` (${formatTime(b.start_time)} to ${formatTime(b.end_time)})` : ' (full day)'
+        const reason = b.reason ? `: ${b.reason}` : ''
+        return `• ${formatDate(b.blocked_date)}${time}${reason}`
       }).join('\n')
 
       return `🚫 Blocked dates:\n${list}`
@@ -867,8 +879,8 @@ async function executeOwnerTool(toolName, input, business) {
         .eq('business_id', business.id)
         .eq('blocked_date', input.date)
 
-      if (error) return `Error unblocking date: ${error.message}`
-      return `✅ ${input.date} is now open for bookings again.`
+      if (error) return `I couldn't unblock that day. Try again in a moment.`
+      return `✅ ${formatDate(input.date)} is open for bookings again.`
     }
 
     case 'mark_no_show': {
@@ -921,15 +933,16 @@ async function executeOwnerTool(toolName, input, business) {
         msg = msg.replace(/{name}/gi, firstName).replace(/{service}/gi, service)
         if (match.customer_phone) {
           await sendSMS(business.sms_number, match.customer_phone, msg).catch(() => {})
-          return `✅ Marked ${match.customer_name} as a no-show (${match.appointment_date}) — recovery text sent.`
+          return `✅ Marked ${match.customer_name} as a no-show (${formatDate(match.appointment_date)}). Recovery text sent.`
         }
       }
 
-      return `✅ Marked ${match.customer_name} as a no-show (${match.appointment_date}).`
+      return `✅ Marked ${match.customer_name} as a no-show (${formatDate(match.appointment_date)}).`
     }
 
     case 'confirm_deposit_waiver': {
-      const nameSearch = input.customer_name?.toLowerCase()
+      const nameSearch = String(input.customer_name || '').toLowerCase().trim()
+      if (!nameSearch) return `Whose deposit should I confirm? Give me their name.`
       const { data: appts } = await supabase
         .from('appointments')
         .select('*')
@@ -954,12 +967,12 @@ async function executeOwnerTool(toolName, input, business) {
       const { sendSMS } = require('../utils/sms')
       const firstName = match.customer_name?.split(' ')[0] || 'there'
       const service = match.service_name || 'appointment'
-      const apptDate = match.appointment_date || ''
+      const apptWhen = `${formatDate(match.appointment_date)}${match.appointment_time ? ` at ${formatTime(match.appointment_time)}` : ''}`
       await sendSMS(business.sms_number, match.customer_phone,
-        `Great news ${firstName}! Your ${service} at ${business.business_name} on ${apptDate} is confirmed — we've got you locked in. See you then! 😊`
+        `Great news ${firstName}! Your ${service} at ${business.business_name} on ${apptWhen} is confirmed. We've got you locked in. See you then! 😊`
       ).catch(() => {})
 
-      return `✅ Confirmed! ${match.customer_name}'s ${service} is locked in and they've been notified. Deposit waived.`
+      return `✅ Confirmed! ${match.customer_name}'s ${service} on ${apptWhen} is locked in and they've been texted.${match.deposit_payment_mode === 'manual' ? ' Deposit marked paid.' : ' Deposit waived.'}`
     }
 
     case 'cancel_deposit_appointment': {
@@ -1000,7 +1013,9 @@ async function executeOwnerTool(toolName, input, business) {
 
       if (!match) return `No pending quote request found for "${input.customer_name}". Check the dashboard for the full list.`
 
-      const price = input.price.startsWith('$') ? input.price : `$${input.price}`
+      const priceRaw = String(input.price ?? '').trim()
+      if (!priceRaw) return `What's the price? For example "quote Jess $240".`
+      const price = priceRaw.startsWith('$') ? priceRaw : `$${priceRaw}`
       const serviceName = match.service_name || 'your service'
       const customMsg = input.message ? ` ${input.message}` : ''
 
@@ -1019,66 +1034,35 @@ async function executeOwnerTool(toolName, input, business) {
     }
 
     case 'approve_booking_request': {
-      const search = input.customer_name?.toLowerCase()
+      const search = String(input.customer_name || '').toLowerCase().trim()
+      if (!search) return `Who should I approve? Give me their name.`
       const { data: pending } = await supabase.from('appointments')
-        .select('*').eq('business_id', business.id).eq('status', 'pending_approval')
-      const match = pending?.find(a => a.customer_name?.toLowerCase().includes(search))
-      if (!match) return `No pending request found for "${input.customer_name}". Check the dashboard for the full list.`
-
-      await supabase.from('appointments').update({ status: 'confirmed' }).eq('id', match.id)
-
-      // Text the customer
-      try {
-        const { sendSMS } = require('../utils/sms')
-        await sendSMS(business.sms_number, match.customer_phone,
-          `Great news! Your ${match.service_name || 'appointment'} on ${match.appointment_date}${match.appointment_time ? ' at ' + match.appointment_time.slice(0,5) : ''} has been confirmed! ✅ We look forward to seeing you. Reply STOP to opt out.`
-        )
-        console.log(`[Approval] Confirmed — texted ${match.customer_phone}`)
-      } catch(smsErr) {
-        console.error('[Approval] Failed to text customer:', smsErr.message)
-      }
-
-      // Email confirmation if customer has email
-      if (match.customer_email) {
-        try {
-          const { sendCustomerConfirmationEmail } = require('../utils/emailService')
-          await sendCustomerConfirmationEmail({
-            customerEmail: match.customer_email,
-            customerName: match.customer_name,
-            businessName: business.business_name,
-            serviceName: match.service_name,
-            appointmentDate: match.appointment_date,
-            appointmentTime: match.appointment_time,
-            smsNumber: business.sms_number
-          })
-        } catch(emailErr) {
-          console.error('[Approval] Failed to email customer:', emailErr.message)
-        }
-      }
-
-      return `✅ Approved! ${match.customer_name} has been texted their confirmation.`
+        .select('*').eq('business_id', business.id).eq('status', 'pending_approval').gte('appointment_date', today).order('appointment_date').order('appointment_time')
+      const matches = (pending || []).filter(a => a.customer_name?.toLowerCase().includes(search))
+      if (!matches.length) return `No pending request for "${input.customer_name}".${pending?.length ? ` Waiting on you: ${[...new Set(pending.map(a => a.customer_name))].join(', ')}.` : ' Nothing is waiting for approval.'}`
+      const distinct = [...new Set(matches.map(a => a.booking_group_id || a.id))]
+      if (distinct.length > 1) return `${matches[0].customer_name} has ${distinct.length} requests: ${matches.map(a => `${formatDate(a.appointment_date)} ${formatTime(a.appointment_time)} (${a.service_name})`).join('; ')}. Which one?`
+      const { approveAppointment } = require('./approval')
+      const r = await approveAppointment(business, matches[0])
+      if (!r.ok) return `I couldn't approve that one (${r.reason === 'not_pending' ? `it's already ${r.status}` : 'not found'}).`
+      const who = matches[0].customer_name
+      if (r.status === 'deposit_pending') return `✅ Approved ${who}'s ${r.serviceDisplay} on ${r.when}. ${r.texted ? 'They were texted the deposit instructions; it locks in once they pay.' : 'I couldn\'t text them, so send them the deposit details another way.'}`
+      return `✅ Approved! ${who}'s ${r.serviceDisplay} on ${r.when} is confirmed${r.texted ? ' and they\'ve been texted' : ', but I couldn\'t text them (no number or opted out)'}.`
     }
 
     case 'deny_booking_request': {
-      const search = input.customer_name?.toLowerCase()
+      const search = String(input.customer_name || '').toLowerCase().trim()
+      if (!search) return `Whose request should I decline? Give me their name.`
       const { data: pending } = await supabase.from('appointments')
-        .select('*').eq('business_id', business.id).eq('status', 'pending_approval')
-      const match = pending?.find(a => a.customer_name?.toLowerCase().includes(search))
-      if (!match) return `No pending request found for "${input.customer_name}". Check the dashboard for the full list.`
-
-      await supabase.from('appointments').update({ status: 'cancelled' }).eq('id', match.id)
-
-      try {
-        const { sendSMS } = require('../utils/sms')
-        await sendSMS(business.sms_number, match.customer_phone,
-          `Hi ${match.customer_name?.split(' ')[0] || 'there'}! Unfortunately we weren't able to accommodate your ${match.service_name || 'appointment'} request at this time. Feel free to text us to explore other options. Reply STOP to opt out.`
-        )
-        console.log(`[Approval] Denied — texted ${match.customer_phone}`)
-      } catch(smsErr) {
-        console.error('[Approval] Failed to text customer:', smsErr.message)
-      }
-
-      return `❌ Denied. ${match.customer_name} has been notified.`
+        .select('*').eq('business_id', business.id).eq('status', 'pending_approval').gte('appointment_date', today).order('appointment_date').order('appointment_time')
+      const matches = (pending || []).filter(a => a.customer_name?.toLowerCase().includes(search))
+      if (!matches.length) return `No pending request for "${input.customer_name}".${pending?.length ? ` Waiting on you: ${[...new Set(pending.map(a => a.customer_name))].join(', ')}.` : ' Nothing is waiting for approval.'}`
+      const distinct = [...new Set(matches.map(a => a.booking_group_id || a.id))]
+      if (distinct.length > 1) return `${matches[0].customer_name} has ${distinct.length} requests: ${matches.map(a => `${formatDate(a.appointment_date)} ${formatTime(a.appointment_time)} (${a.service_name})`).join('; ')}. Which one?`
+      const { denyAppointment } = require('./approval')
+      const r = await denyAppointment(business, matches[0], input.reason)
+      if (!r.ok) return `I couldn't decline that one (${r.reason === 'not_pending' ? `it's already ${r.status}` : 'not found'}).`
+      return `Declined ${matches[0].customer_name}'s ${matches[0].service_name || 'request'} for ${formatDate(matches[0].appointment_date)}.${r.texted ? ' They\'ve been told and invited to pick another time.' : ' I couldn\'t text them, so please let them know.'}`
     }
 
     // 🔒 v191: owner reminders. The scheduler sweep (every 5 min) texts them
@@ -1784,7 +1768,7 @@ You can help them:
 - Block dates/times — "Block next Friday"
 - Running late — alert all customers
 - Cancel appointments — "Cancel John's appointment"
-- Reschedule appointments — "Reschedule Brandon's appointment" (cancels + texts customer to rebook)
+- Reschedule appointments — "Move Jess to Friday at 3" moves it in place and texts them; with no new time it cancels and texts them to rebook
 - Staff callout — "Sarah is out today"
 - Remove staff — "Remove John"
 - Reassign clients — "Move Sarah's clients to Mike"
