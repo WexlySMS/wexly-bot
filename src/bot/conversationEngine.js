@@ -289,7 +289,7 @@ DO NOT include the meeting link in your booking confirmation reply — the serve
 - SMART CANCELLATION: If a customer wants to cancel, NEVER cancel immediately. First check available slots and offer 1-2 alternatives: "Before I cancel that — we have [day] at [time] open, would that work instead?" If they still want to cancel (or there are no slots), you MUST call the cancel_appointment tool — that tool call is the ONLY thing that actually cancels it. Do NOT tell the customer it's cancelled until the tool has run and succeeded. Never reply "your appointment has been cancelled" without having just called cancel_appointment.
 - APPOINTMENT NOTES: When creating an appointment, always include any relevant context from the conversation in the notes field. This includes: special requests ("keep it natural", "sensitive scalp"), preferences ("I prefer the back room"), health info ("allergic to X"), style references ("like last time"), specific instructions, or anything the customer mentioned that the staff should know. Combine with staff preference if applicable. Format: "Special requests: [details] | Staff preference: [name]" — only include sections that apply.
 ${business.referral_tracking_enabled ? `- REFERRAL TRACKING: After confirming a NEW customer's first booking (not returning customers), casually ask: "${business.referral_ask_message || 'Quick question — did someone refer you to us, or how did you hear about us? 😊'}" Save their answer in the appointment notes.` : ''}
-${proSettings.recurring_enabled && business.plan === 'pro' ? `- RECURRING APPOINTMENTS: This business supports recurring bookings. If a customer says "every week", "every 6 weeks", "every month", or "book me regularly", set recurring_interval_weeks (e.g. 1=weekly, 2=biweekly, 4=monthly, 6=every 6 weeks) and recurring_count (default 6, max 12) when calling create_appointment. Confirm with them first: "I'll book you every X weeks — how many sessions ahead would you like me to schedule? I can book up to 12."` : ''}
+${proSettings.recurring_enabled && business.plan !== 'solo' ? `- RECURRING APPOINTMENTS: This business supports recurring bookings. If a customer says "every week", "every 6 weeks", "every month", or "book me regularly", set recurring_interval_weeks (e.g. 1=weekly, 2=biweekly, 4=monthly, 6=every 6 weeks) and recurring_count (default 6, max 12) when calling create_appointment. Confirm with them first: "I'll book you every X weeks — how many sessions ahead would you like me to schedule? I can book up to 12."` : ''}
 
 ## HANDLING MULTIPLE STAFF MEMBERS
 ${(business.staff_members||[]).filter(s=>s.name).length ? `This business has the following staff members: ${(business.staff_members||[]).filter(s=>s.name).map(s=>s.name).join(', ')}` : business.bot_staff ? `This business has the following staff members:\n${business.bot_staff}` : ''}
@@ -1158,7 +1158,7 @@ async function executeTool(toolName, input, context) {
       // ── Recurring appointments (Pro) ────────────────────────────────────────
       let recurringText = ''
       const proSettings = business.pro_settings || {}
-      if (input.recurring_interval_weeks && proSettings.recurring_enabled && business.plan === 'pro') {
+      if (input.recurring_interval_weeks && proSettings.recurring_enabled && business.plan !== 'solo') {
         try {
           const intervalWeeks = Math.min(Math.max(parseInt(input.recurring_interval_weeks), 1), 52)
           const count = Math.min(parseInt(input.recurring_count || 6), 12)

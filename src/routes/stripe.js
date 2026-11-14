@@ -550,6 +550,7 @@ router.post('/webhook', async (req, res) => {
         if (!userId) break
 
         await supabase.from('businesses').update({ status: 'past_due' }).eq('user_id', userId)
+        try { const { data: pb } = await supabase.from('businesses').select('business_name, owner_name, email, owner_phone, plan, profile_slug, signup_source').eq('user_id', userId).maybeSingle(); require('../utils/partner').partnerStatusNotice(pb, 'past_due').catch(() => {}) } catch {}
 
         // Send payment failed email — via the proven sendEmail path using the
         // AUTHENTICATED noreply@mail.getwexly.com sender. The previous raw
@@ -610,6 +611,7 @@ router.post('/webhook', async (req, res) => {
           .from('businesses')
           .update({ status: 'cancelled', active: false })
           .eq('user_id', userId)
+        try { const { data: pb } = await supabase.from('businesses').select('business_name, owner_name, email, owner_phone, plan, profile_slug, signup_source').eq('user_id', userId).maybeSingle(); require('../utils/partner').partnerStatusNotice(pb, 'cancelled').catch(() => {}) } catch {}
 
         console.log(`[Stripe] Subscription cancelled — user ${userId} deactivated. Number RETAINED (manual release via audit).`)
         break

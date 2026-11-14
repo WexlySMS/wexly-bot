@@ -1651,7 +1651,8 @@ app.post('/groups/:groupId/broadcast', requireAuth, async (req, res) => {
         : `${personalizedMsg}\n\nReply STOP to unsubscribe.`
 
       try {
-        await sendSMS(biz.sms_number, customer.phone, finalMsg)
+        const gr = await sendSMS(biz.sms_number, customer.phone, finalMsg, undefined, { marketing: true, businessId: biz.id })
+        if (gr?.blocked) { skipped = (skipped || 0) + 1; continue }
         sent++
         await new Promise(r => setTimeout(r, 100)) // rate limit
       } catch (err) {
@@ -2987,13 +2988,17 @@ app.post('/public/book/:slug', async (req, res) => {
       .from('customers').select('id').eq('business_id', biz.id).eq('phone', normalizedPhone).maybeSingle()
 
     if (!existingCustomer) {
-      await supabase.from('customers').insert({
+      const ins = await supabase.from('customers').insert({
         business_id: biz.id,
         name: customer_name,
         phone: normalizedPhone,
         email: email || null,
-        source: 'website'
+        source: 'website',
+        consent_source: 'web_booking', consented_at: new Date().toISOString()
       })
+      if (ins.error && /consent_source|42703/i.test(ins.error.message || '')) await supabase.from('customers').insert({ business_id: biz.id, name: customer_name, phone: normalizedPhone, email: email || null, source: 'website' })
+    } else {
+      require('./src/utils/consent').markConsent(biz.id, normalizedPhone, 'web_booking').catch(() => {})
     }
 
     // Create appointment
@@ -3998,12 +4003,13 @@ app.post('/campaigns/sms/send', requireBusinessAuth, async (req, res) => {
 
   // Send with rate limiting (1 per 200ms to stay under Twilio limits)
   const fullMsg = message + '\n\nReply STOP to unsubscribe.'
-  let sent = 0, failed = 0
+  let sent = 0, failed = 0, skipped = 0
 
   for (let i = 0; i < recipients.length; i++) {
     const r = recipients[i]
     try {
-      await sendSMS(biz.sms_number, r.phone, fullMsg)
+      const sr = await sendSMS(biz.sms_number, r.phone, fullMsg, undefined, { marketing: true, businessId: biz.id })
+      if (sr?.blocked) { skipped++; continue }
       sent++
 
       // Save campaign message to customer's conversation session so bot has context
@@ -4045,7 +4051,7 @@ app.post('/campaigns/sms/send', requireBusinessAuth, async (req, res) => {
   })
 
   console.log(`[SMS Campaign] ${biz.business_name}: sent ${sent}, failed ${failed} of ${recipients.length}`)
-  res.json({ sent, failed, total: recipients.length })
+  res.json({ sent, failed, skipped_no_consent: skipped, total: recipients.length })
 })
 
 // ── ABANDONED SIGNUP CART ────────────────────────────────────────────────────

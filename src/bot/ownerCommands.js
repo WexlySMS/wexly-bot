@@ -732,7 +732,7 @@ async function executeOwnerTool(toolName, input, business) {
       if (!members?.length) return `The "${group.name}" group has no members yet.`
 
       const { sendSMS } = require('../utils/sms')
-      let sent = 0
+      let sent = 0, held = 0
 
       for (const m of members) {
         const c = m.customers
@@ -740,7 +740,8 @@ async function executeOwnerTool(toolName, input, business) {
         const firstName = c.name?.split(' ')[0] || 'there'
         const msg = message.replace(/{name}/gi, firstName) + (message.includes('STOP') ? '' : '\n\nReply STOP to unsubscribe.')
         try {
-          await sendSMS(business.sms_number, c.phone, msg)
+          const gr = await sendSMS(business.sms_number, c.phone, msg, undefined, { marketing: true, businessId: business.id })
+          if (gr?.blocked) { held++; continue }
           sent++
           await new Promise(r => setTimeout(r, 100))
         } catch (err) {
@@ -748,7 +749,7 @@ async function executeOwnerTool(toolName, input, business) {
         }
       }
 
-      return `✅ Sent to ${sent} member${sent !== 1 ? 's' : ''} in "${group.name}"!`
+      return `✅ Sent to ${sent} member${sent !== 1 ? 's' : ''} in "${group.name}".${held ? ` ${held} skipped: they were imported or added by hand and haven't texted this number yet, so marketing texts to them are held until they do.` : ''}`
     }
 
     case 'running_late': {
@@ -1435,7 +1436,10 @@ async function handleBookClient(business, input) {
   }
   let appt
   try { appt = await db.createAppointment(row) } catch (e) { console.error('[Owner] book_client failed:', e.message); return `I couldn't save that booking. Try again in a moment.` }
-  if (phone) await supabase.from('customers').upsert({ business_id: business.id, name: row.customer_name, phone, source: 'owner' }, { onConflict: 'business_id,phone', ignoreDuplicates: true })
+  if (phone) {
+    const up = await supabase.from('customers').upsert({ business_id: business.id, name: row.customer_name, phone, source: 'owner', consent_source: 'owner_added' }, { onConflict: 'business_id,phone', ignoreDuplicates: true })
+    if (up.error && /consent_source|42703/i.test(up.error.message || '')) await supabase.from('customers').upsert({ business_id: business.id, name: row.customer_name, phone, source: 'owner' }, { onConflict: 'business_id,phone', ignoreDuplicates: true })
+  }
   let told = ''
   if (phone && input.notify !== false && business.sms_number) {
     const first = name.split(' ')[0]

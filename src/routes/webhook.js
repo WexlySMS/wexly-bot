@@ -358,7 +358,11 @@ router.post('/sms', validateTwilio, async (req, res) => {
     // Look up which business owns this Twilio number (paused ones too: the
     // owner must always be able to text it, and customers get silence below)
     const business = await db.getBusinessBySmsNumber(toNumber, { includePaused: true })
-    if (business) { try { require('../utils/usage').recordSms({ businessId: business.id, smsNumber: toNumber, direction: 'in', body: incomingText, media: mediaUrls?.length || 0 }) } catch {} }
+    if (business) {
+      try { require('../utils/usage').recordSms({ businessId: business.id, smsNumber: toNumber, direction: 'in', body: incomingText, media: mediaUrls?.length || 0 }) } catch {}
+      // v216: a number that texts in has opted in to hear back; imported rows flip to texted_in here.
+      if (!ownerPhoneMatch(business, customerPhone)) require('../utils/consent').markConsent(business.id, customerPhone, 'texted_in').catch(() => {})
+    }
 
     if (!business) {
       console.error(`[SMS] No business found for number ${toNumber}`)

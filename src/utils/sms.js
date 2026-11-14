@@ -48,7 +48,18 @@ async function retryUnregistered(messageSid) {
 
 // Send an SMS from a Wexly number to a customer
 // Usage: sendSMS(fromNumber, toNumber, messageBody)
-async function sendSMS(from, to, body, mediaUrls) {
+async function sendSMS(from, to, body, mediaUrls, opts = {}) {
+  // v216: marketing sends (rebooking, birthday, campaigns, blasts, review asks)
+  // pass { marketing: true, businessId } and are refused for numbers that never
+  // texted in or booked online themselves. Transactional texts never set this.
+  if (opts && opts.marketing && opts.businessId) {
+    try {
+      if (!(await require('./consent').canMarket(opts.businessId, to))) {
+        console.log(`[SMS] Held marketing text to ${to}: no texted-in or web-booking consent on file`)
+        return { success: false, blocked: true, reason: 'no_consent' }
+      }
+    } catch (e) { console.error('[SMS] consent check failed, sending:', e.message) }
+  }
   if (!from || !to || !body) {
     console.error('[SMS] Missing required fields — from, to, or body is empty')
     return { success: false, error: 'Missing fields' }

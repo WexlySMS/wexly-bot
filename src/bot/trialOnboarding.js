@@ -871,6 +871,7 @@ async function runTrialOnboardingDrip() {
       // Expiry wins over everything else.
       if (!hasCard && endsAt && endsAt < now) {
         await supabase.from('businesses').update({ status: 'trial_expired' }).eq('id', biz.id)
+        require('../utils/partner').partnerStatusNotice(biz, 'trial_expired', 'The bot has stopped answering clients and the booking page is dark until a card is added.').catch(() => {})
         await sendSMS(from, to, expiredOwnerReply(biz))
         await markStep(biz.id, ob, 'expired_at')
         console.log(`[InstantTrial] ${biz.business_name} trial expired`)

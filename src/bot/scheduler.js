@@ -525,7 +525,7 @@ async function runCustomAutomations() {
         for (const appt of (appts || [])) {
           const msg = buildAutomationMessage(seq.message, appt.customer_name, biz.business_name)
           if (!msg) continue
-          await sendSMS(biz.sms_number, appt.customer_phone, msg)
+          const r = await sendSMS(biz.sms_number, appt.customer_phone, msg, undefined, { marketing: true, businessId: biz.id })
           await sb.from('appointments').update({ followup_sent: true }).eq('id', appt.id)
           fired++
         }
@@ -543,7 +543,7 @@ async function runCustomAutomations() {
         for (const appt of (appts || [])) {
           const msg = buildAutomationMessage(seq.message, appt.customer_name, biz.business_name)
           if (!msg) continue
-          await sendSMS(biz.sms_number, appt.customer_phone, msg)
+          const r = await sendSMS(biz.sms_number, appt.customer_phone, msg, undefined, { marketing: true, businessId: biz.id })
           fired++
         }
 
@@ -565,7 +565,7 @@ async function runCustomAutomations() {
           seen.add(appt.customer_phone)
           const msg = buildAutomationMessage(seq.message, appt.customer_name, biz.business_name)
           if (!msg) continue
-          await sendSMS(biz.sms_number, appt.customer_phone, msg)
+          const r = await sendSMS(biz.sms_number, appt.customer_phone, msg, undefined, { marketing: true, businessId: biz.id })
           fired++
         }
 
@@ -585,7 +585,7 @@ async function runCustomAutomations() {
         for (const appt of (appts || [])) {
           const msg = buildAutomationMessage(seq.message, appt.customer_name, biz.business_name)
           if (!msg) continue
-          await sendSMS(biz.sms_number, appt.customer_phone, msg)
+          const r = await sendSMS(biz.sms_number, appt.customer_phone, msg, undefined, { marketing: true, businessId: biz.id })
           fired++
         }
       }
@@ -646,7 +646,7 @@ async function sendRebookingReminders() {
         const service = appt.service_name || 'appointment'
         const msg = `Hey ${firstName}! 👋 It's been ${rebookWeeks} weeks since your last ${service} at ${biz.business_name}. Want to get back on the books? Just text back with a day that works!`
 
-        await sendSMS(biz.sms_number, appt.customer_phone, msg)
+        const r = await sendSMS(biz.sms_number, appt.customer_phone, msg, undefined, { marketing: true, businessId: biz.id })
         await sb.from('appointments').update({ rebook_sent: true }).eq('id', appt.id)
         sent++
         await new Promise(r => setTimeout(r, 200))
@@ -700,7 +700,7 @@ async function sendSmartRebookingReminders() {
           const firstName = appt.customer_name?.split(' ')[0] || 'there'
           const msg = `Hey ${firstName}! It's been ${weeks} weeks since your ${serviceName} at ${biz.business_name} — time to book your next one! 😊 Just text back with a day that works.`
 
-          await sendSMS(biz.sms_number, appt.customer_phone, msg)
+          const r = await sendSMS(biz.sms_number, appt.customer_phone, msg, undefined, { marketing: true, businessId: biz.id })
           await sb.from('appointments').update({ smart_rebook_sent: true }).eq('id', appt.id)
           sent++
           await new Promise(r => setTimeout(r, 200))
@@ -746,7 +746,7 @@ async function sendCancellationRebooking() {
 
       const msg = `Hey ${firstName}! We noticed you cancelled your ${service} at ${biz.business_name}. No worries — whenever you're ready to rebook just text back and we'll get you set up! 😊`
 
-      await sendSMS(biz.sms_number, appt.customer_phone, msg)
+      const r = await sendSMS(biz.sms_number, appt.customer_phone, msg, undefined, { marketing: true, businessId: biz.id })
       await sb.from('appointments').update({ cancel_rebook_sent: true }).eq('id', appt.id)
       sent++
       await new Promise(r => setTimeout(r, 200))
@@ -788,7 +788,7 @@ async function sendBirthdayMessages() {
           ? biz.birthday_message.replace('{name}', firstName).replace('{offer}', offer)
           : `Happy Birthday ${firstName}! 🎂 The whole team at ${biz.business_name} is wishing you an amazing day!${offer ? ` As a birthday gift, ${offer} — just mention this text when you book! 🎁` : ''}`
 
-        await sendSMS(biz.sms_number, customer.phone, msg)
+        const r = await sendSMS(biz.sms_number, customer.phone, msg, undefined, { marketing: true, businessId: biz.id })
         sent++
         await new Promise(r => setTimeout(r, 200))
       }
@@ -1055,7 +1055,7 @@ async function sendQuoteReminders() {
       const quoteAmount = (appt.notes || '').match(/Quote: (\$[\d,.]+)/)?.[1] || ''
       const msg = `Hey ${firstName}! Just following up on your ${appt.service_name || 'appointment'} quote${quoteAmount ? ' of ' + quoteAmount : ''}. Would you like to go ahead and book? Just reply YES to confirm or text us with any questions. Reply STOP to opt out.`
 
-      await sendSMS(biz.sms_number, appt.customer_phone, msg)
+      const r = await sendSMS(biz.sms_number, appt.customer_phone, msg, undefined, { marketing: true, businessId: biz.id })
       await sb.from('appointments').update({ quote_reminder_sent: true }).eq('id', appt.id)
       sent++
       console.log(`[QuoteReminder] Sent to ${appt.customer_phone} for ${biz.business_name}`)

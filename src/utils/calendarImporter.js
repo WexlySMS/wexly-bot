@@ -560,7 +560,11 @@ async function applyEvents(biz, items, { source, snap = null, announceNew = fals
   }
   if (customerUpserts.length) {
     const seen = new Set(); const rows = customerUpserts.filter(c => { if (seen.has(c.phone)) return false; seen.add(c.phone); return true })
-    for (let i = 0; i < rows.length; i += 50) await supabase.from('customers').upsert(rows.slice(i, i + 50), { onConflict: 'business_id,phone', ignoreDuplicates: true }).then(({ error }) => { if (error) console.error('[CalImport] customers upsert failed:', error.message) })
+    // v216: imported clients are marked so marketing texts wait until they text in (consent.js).
+    for (let i = 0; i < rows.length; i += 50) await supabase.from('customers').upsert(rows.slice(i, i + 50).map(c => ({ ...c, consent_source: 'imported' })), { onConflict: 'business_id,phone', ignoreDuplicates: true }).then(async ({ error }) => {
+      if (error && /consent_source|42703/i.test(error.message || '')) ({ error } = await supabase.from('customers').upsert(rows.slice(i, i + 50), { onConflict: 'business_id,phone', ignoreDuplicates: true }))
+      if (error) console.error('[CalImport] customers upsert failed:', error.message)
+    })
   }
   result.noPhone = [...new Set(result.noPhone)]
   return result
@@ -763,7 +767,8 @@ async function attachClientPhone(businessId, name, phone) {
   if (!hits.length) return { ok: false, name }
   await supabase.from('appointments').update({ customer_phone: phone }).in('id', hits.map(h => h.id))
   const fullName = hits.find(h => normName(h.customer_name).includes(' '))?.customer_name || hits[0].customer_name
-  await supabase.from('customers').upsert({ business_id: businessId, name: fullName, phone, source: 'calendar' }, { onConflict: 'business_id,phone', ignoreDuplicates: true })
+  const up = await supabase.from('customers').upsert({ business_id: businessId, name: fullName, phone, source: 'calendar', consent_source: 'imported' }, { onConflict: 'business_id,phone', ignoreDuplicates: true })
+  if (up.error && /consent_source|42703/i.test(up.error.message || '')) await supabase.from('customers').upsert({ business_id: businessId, name: fullName, phone, source: 'calendar' }, { onConflict: 'business_id,phone', ignoreDuplicates: true })
   return { ok: true, name: fullName, count: hits.length }
 }
 async function listNoPhone(businessId) {

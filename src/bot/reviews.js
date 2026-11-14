@@ -68,7 +68,8 @@ async function sendReviewRequests() {
     if (insErr) continue
     try {
       const isToday = date === new Date(now).toLocaleDateString('en-CA', { timeZone: tz })
-      await sendSMS(biz.sms_number, a.customer_phone, `Hi ${firstName(a.customer_name)}, thanks for coming in to ${biz.business_name}! How did we do${isToday ? ' today' : ''}? Reply with a number from 1 to 5.`)
+      const rr = await sendSMS(biz.sms_number, a.customer_phone, `Hi ${firstName(a.customer_name)}, thanks for coming in to ${biz.business_name}! How did we do${isToday ? ' today' : ''}? Reply with a number from 1 to 5.`, undefined, { marketing: true, businessId: a.business_id })
+      if (rr?.blocked) { await supabase.from('reviews').update({ status: 'skipped' }).eq('appointment_id', a.id); continue }
       sent++
     } catch (e) { console.error('[Reviews] ask failed:', e.message) }
   }
