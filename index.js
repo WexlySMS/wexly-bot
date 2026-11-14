@@ -3851,7 +3851,7 @@ const server = app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════╗
   ║   Wexly SMS Bot v2.0                 ║
-  ║   BUILD: v210 (Solo: approval, quote, deposits, checkout unlocked)║
+  ║   BUILD: v211 (Solo basics unlocked; shorter setup texts)║
   ║   Running on port ${PORT}               ║
   ║                                      ║
   ║   SMS:    POST /webhook/sms          ║

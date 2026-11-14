@@ -261,9 +261,8 @@ function setupCallLink() { return `${SITE_URL}/#setup-call` }
 // what's coming (how many questions, how long, that they can stop and resume,
 // and that a human will do it for them if they'd rather) before the first one.
 function setupOfferReply(biz) {
-  return `Let's get you set up. It's about 6 quick questions, 3 minutes total, and I save as we go so you can stop and pick up later. ` +
-    `Reply SKIP to any question, or HELP any time and a real person finishes it with you (or book 20 minutes: ${setupCallLink()}).\n\n` +
-    `First: send me the link to your current booking page or website, or a photo of your service menu. I'll load your services and hours from it.`
+  return `Let's get you set up. 6 quick questions. Reply SKIP to pass on any of them. Need a hand at any time? Text HELP and we will schedule setup assistance.\n\n` +
+    `First, send your booking page or website link, or a photo of your service menu.`
 }
 // Owner texted SETUP again (or CONTINUE) with the checklist already started:
 // pick up exactly where they left off instead of starting over.
@@ -272,7 +271,7 @@ async function resumeSetup(biz) {
   const ob = b.onboarding || {}
   const say = async (m) => { await sendSMS(b.sms_number, b.owner_phone, m); try { require('./ownerCommands').noteOwnerOutbound(b.id, m) } catch {} }
   if (ob.setup_complete_at) {
-    await say(`You're already set up. Anything you want changed (services, hours, deposits, staff), just tell me here. Want a walkthrough with a person? ${setupCallLink()}`)
+    await say(`You're already set up. To change anything (services, hours, deposits, staff), just tell me here. Text HELP any time and we will schedule setup assistance.`)
     return true
   }
   const pq = ob.pending_question
@@ -355,8 +354,8 @@ async function announceImport(biz, result, { url = null } = {}) {
   if (result.photos) bits.push(`${result.photos} photo${result.photos === 1 ? '' : 's'}`)
   if (!bits.length) return null
   const page = fresh?.profile_slug ? `${SITE_URL}/book/${fresh.profile_slug}` : null
-  const msg = `Done. I loaded ${bits.join(', ')} from your ${url === 'photos' ? 'menu' : 'page'}.` + (page ? ` Your booking page is live: ${page}` : '') +
-    ` Anything to change, like "make Balayage $240", just tell me.`
+  const msg = `Done. Loaded ${bits.join(', ')} from your ${url === 'photos' ? 'menu' : 'page'}.` + (page ? ` Your booking page: ${page}` : '') +
+    ` To change anything, just tell me, like "make Balayage $240".`
   await sendSMS(biz.sms_number, biz.owner_phone, msg)
   try { require('./ownerCommands').noteOwnerOutbound(biz.id, msg) } catch (e) { console.error('[Setup] owner note failed:', e.message) }
   const extra = { auto_import: { url, services: names.length, hours: result.hours, photos: result.photos } }
@@ -435,11 +434,11 @@ function progressLabel(biz, services, step, ctx = {}) {
 const SKIP_TAIL = ` Reply SKIP to pass.`
 function questionFor(biz, step, services, label = '') {
   switch (step) {
-    case 'import_mode': return `${label}Should clients be able to book all your services instantly, or do you want to approve each one first? Reply INSTANT or APPROVE.`
-    case 'deposits': return `${label}Do any services need a deposit to book? Reply NO, or tell me which and how much, like "Balayage $50, Color $40" or "all $25".`
-    case 'deposit_method': return `${label}How should deposits be collected? Reply STRIPE and I'll text you a link to connect your Stripe (clients pay by card, bookings confirm themselves), or paste your payment link (Venmo, Zelle, Square, PayPal) and I'll send that to clients and tell you when they say they've paid.`
-    case 'hours': return `${label}What are your hours? Something like "Tue to Sat 9 to 6, closed Sun and Mon" is perfect.${SKIP_TAIL}`
-    case 'staff': return `${label}Is it just you taking appointments? Reply JUST ME, or the names of everyone who does, like "Mia, Jordan".`
+    case 'import_mode': return `${label}Book instantly, or approve each booking first? Reply INSTANT or APPROVE.`
+    case 'deposits': return `${label}Any deposits? Reply NO, or like "Balayage $50" or "all $25".`
+    case 'deposit_method': return `${label}Collect deposits by card? Reply STRIPE for a connect link, or paste your Venmo, Zelle, Square or PayPal link.`
+    case 'hours': return `${label}Your hours? Like "Tue to Sat 9 to 6".${SKIP_TAIL}`
+    case 'staff': return `${label}Just you, or who else takes appointments? Reply JUST ME, or names like "Mia, Jordan".`
     case 'bookings': {
       const { bookingsQuestion, platformFromUrl } = require('../utils/calendarImporter')
       const qs = bookingsQuestion(platformFromUrl(biz.onboarding?.auto_import?.url || biz.onboarding?.setup_source?.url || ''))
@@ -616,7 +615,7 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
     }
   }
   if (HELP_RE.test(t)) {
-    await say(`You got it. Someone from Wexly will text you shortly and finish the setup with you. Or grab a time that suits you: ${setupCallLink()} Your number works for clients in the meantime.`)
+    await say(`You got it. We will text you shortly to schedule setup assistance. Or pick a time now: ${setupCallLink()} Your number works for clients in the meantime.`)
     await setPending(biz, pq.kind, { help_requested_at: new Date().toISOString(), help_requested_step: pq.kind })
     notifyHelpRequest(biz, pq.kind).catch(e => console.error('[Setup] help alert failed:', e.message))
     return '__sent__'
@@ -671,8 +670,8 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
     {
       const { error } = await supabase.from('services').update({ booking_mode: mode }).eq('business_id', biz.id)
       if (error) { console.error('[Setup] booking_mode update failed:', error.message); return null }
-      await say(yes ? `Done. Everything is instant book: a client texts, picks a time, and it goes straight on your calendar. If any should need your OK first, just tell me which.`
-                    : `Done. Every booking request comes to you first, and nothing is confirmed until you approve it.`)
+      await say(yes ? `Done. Everything books instantly. If any service should need your OK first, just tell me which.`
+                    : `Done. Every booking comes to you first. Nothing is confirmed until you approve it.`)
     }
     await setPending(biz, null, { import_mode_at: new Date().toISOString(), import_mode: mode })
     await advanceSetup(biz, 'import_mode')
@@ -721,7 +720,7 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
     if (/^\s*stripe\s*[.!]*\s*$/i.test(t) || /\bconnect stripe\b/i.test(t)) {
       try {
         const link = await stripeConnectUrl(biz)
-        await say(`Here's your Stripe link: ${link} It takes about two minutes. Once it's connected, deposits are charged by card and bookings confirm on their own. I'll text you when it's done.`)
+        await say(`Here's your Stripe link: ${link} Takes about two minutes. Once connected, deposits are charged by card and bookings confirm on their own.`)
         await setPending(biz, null, { deposit_method: 'stripe', deposit_method_at: new Date().toISOString() })
         await advanceSetup(biz, 'deposit_method'); return '__sent__'
       } catch (e) { console.error('[Setup] stripe link failed:', e.message); await say(`I couldn't make your Stripe link just now. You can connect Stripe from your dashboard under Billing, or paste a payment link here instead.`); return '__sent__' }
@@ -729,7 +728,7 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
     if (url) {
       const link = /^https?:\/\//i.test(url) ? url : 'https://' + url
       await supabase.from('businesses').update({ payment_link: link }).eq('id', biz.id)
-      await say(`Saved. When a client books a service with a deposit, I'll send them ${link} and text you when they say they've paid, so you can reply "confirm <name>" to lock it in.`)
+      await say(`Saved. Clients get ${link} when they book a service with a deposit. I'll text you when they say they've paid; reply "confirm <name>" to lock it in.`)
       await setPending(biz, null, { deposit_method: 'link', deposit_method_at: new Date().toISOString() })
       await advanceSetup(biz, 'deposit_method'); return '__sent__'
     }
@@ -760,7 +759,7 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
     const have = new Set(existing.map(st => st.name.toLowerCase()))
     const added = names.filter(n => !have.has(n.toLowerCase())).map(n => ({ name: n.replace(/\b\w/g, c => c.toUpperCase()), phone: '', email: '', auto_schedule: false, notify_via: 'email' }))
     await supabase.from('businesses').update({ staff_members: [...existing, ...added] }).eq('id', biz.id)
-    await say(`Added ${added.map(a => a.name).join(', ')}. Clients can ask for them by name. Add their phone or email in your dashboard under Staff if you want them notified.${String(biz.plan || '').toLowerCase() === 'solo' ? ' One thing: your Solo plan is built for one provider, so when you get a chance, switch to Standard in the app under Billing to keep staff booking in step.' : ''}`)
+    await say(`Added ${added.map(a => a.name).join(', ')}. Clients can ask for them by name. Add their phone in the app under Staff if you want them notified.${String(biz.plan || '').toLowerCase() === 'solo' && added.length > 1 ? ' Solo is built for one provider; upgrade to Standard for staff scheduling.' : ''}`)
     await setPending(biz, null, { staff_at: new Date().toISOString() })
     await advanceSetup(biz, 'staff'); return '__sent__'
   }
@@ -768,8 +767,7 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
 }
 
 function setupSourceAck(biz) {
-  return `Got it. We'll set everything up from that and text you here when it's done, usually within a few hours. ` +
-    `Anything you want handled differently from what's on there, just tell me.`
+  return `Got it. We'll set it up from that and text you when it's done, usually within a few hours.`
 }
 
 // v207: owner replied HELP mid-checklist. Brandon gets the step they stalled on.
@@ -906,7 +904,7 @@ async function runTrialOnboardingDrip() {
         if (daytime && quietMin >= 180 && n1 == null) {
           const short = shortQuestion(biz, pq.kind)
           if (short) {
-            await sendSMS(from, to, `${short.replace(/^Still on setup: /, 'Whenever you have a sec, still on setup: ').replace(/^Still need/, 'Whenever you have a sec, still need')} Reply HELP if you'd rather a person finish it with you.`)
+            await sendSMS(from, to, `${short.replace(/^Still on setup: /, 'Whenever you have a sec, still on setup: ').replace(/^Still need/, 'Whenever you have a sec, still need')} Reply HELP and we will schedule setup assistance.`)
             const upd = { ...nudges, [key]: { n: 1, at: now.toISOString() } }
             await markStep(biz.id, ob, null, { setup_nudges: upd }); ob.setup_nudges = upd
             sent++
@@ -914,7 +912,7 @@ async function runTrialOnboardingDrip() {
         } else if (daytime && quietMin >= 20 * 60 && n1?.n === 1 && sinceN1 >= 6 * 60) {
           const { data: svcRows } = await supabase.from('services').select('id, name, deposit_amount, booking_mode').eq('business_id', biz.id).neq('active', false)
           const left = SETUP_STEPS.filter(s => s === pq.kind || stepNeeded(biz, svcRows || [], s)).length
-          await sendSMS(from, to, `Your setup is ${left === 1 ? 'one question' : `${left} quick questions`} from done. Want to finish it now, or have someone do it for you? Reply CONTINUE or HELP. (Clients can already book by text either way.)`)
+          await sendSMS(from, to, `Your setup is ${left === 1 ? 'one question' : `${left} quick questions`} from done. Reply CONTINUE to finish, or HELP and we will schedule setup assistance. Clients can already book by text either way.`)
           const upd = { ...nudges, [key]: { n: 2, at: now.toISOString() } }
           await markStep(biz.id, ob, null, { setup_nudges: upd }); ob.setup_nudges = upd
           sent++

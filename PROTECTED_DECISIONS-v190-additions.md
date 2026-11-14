@@ -314,3 +314,6 @@ Infrastructure
 ## 81. Solo keeps the basics (v210)
 - Booking approval, quote mode, deposits (Stripe or payment link), and checkout/invoicing are available on every plan, Solo included. The plan line is staff count (Solo 1, Standard 10, Pro unlimited) plus Standard's growth automations and Pro's marketing tools, never whether a booking can be confirmed or paid for.
 - Removed: the Solo gates in trialOnboarding (booking mode question), ownerCommands update_services (request/quote), and the dashboard (deposit field, booking-mode tiles, Stripe card, Checkout page). Do not reintroduce a plan check on a basic booking or payment path.
+
+## 82. Setup texts are short (v211)
+- Every setup message is one or two plain sentences: the question, the reply format, nothing else. The welcome names SKIP once and the HELP line once ("Text HELP and we will schedule setup assistance"), and the rest of the flow does not repeat either. Confirmations state what changed and stop. Do not pad setup texts with reassurance, timing estimates, or explanations of what the bot will do next.

@@ -92,10 +92,10 @@ function bookingsQuestion(platformKey) {
   const p = PLATFORM[platformKey]
   if (p && !p.sync) {
     return [
-      `Last thing: want me to bring over your upcoming appointments so nothing double-books while you switch? ${p.name} doesn't share its calendar, so screenshots are the move: open your ${p.name} calendar, screenshot each week for the next month or so, and text them here. Reply SKIP to pass.`
+      `Last thing: bring over your upcoming appointments? ${p.name} doesn't share its calendar, so screenshot each week for the next month and text them to me. Reply SKIP to pass.`
     ]
   }
-  const ask = `Last thing: want me to bring over your upcoming appointments so nothing double-books while you switch? Text me your calendar link and I'll do the rest. Screenshots of your calendar work too. Reply SKIP to pass.`
+  const ask = `Last thing: bring over your upcoming appointments? Text me your calendar link, or screenshots of your calendar. Reply SKIP to pass.`
   const how = `To get the link: ${p?.step ? p.step + ' ' : 'turn on calendar sync in your current booking app and pick Google. '}${GOOGLE_STEP} ${APPLE_STEP}`
   return [ask, how]
 }
