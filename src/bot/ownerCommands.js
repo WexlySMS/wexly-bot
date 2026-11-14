@@ -285,7 +285,7 @@ const OWNER_TOOLS = [
   },
   {
     name: 'set_deposit_method',
-    description: 'Set how deposits are collected. Use when the owner says "connect stripe", "set up stripe for deposits", "use my venmo for deposits: venmo.com/x", "my payment link is ...", "deposits go through square: <link>", "turn off deposits". method=stripe texts them a Stripe connect link; method=link saves their payment URL (clients pay there, owner confirms each); method=off clears the link.',
+    description: 'Set how deposits are collected. Use when the owner says "connect stripe", "set up stripe for deposits", "use my venmo for deposits: venmo.com/x", "my payment link is ...", "deposits go through square: <link>", "remove zelle", "stop offering venmo", "take the payment link off", "turn off deposits". method=stripe texts them a Stripe connect link; method=link saves their payment URL or Zelle/Venmo/Cash App handle (clients pay there, owner confirms each); method=off removes the saved link or handle (card deposits keep running through Stripe if it is connected). Removing Zelle, Venmo, Cash App or a payment link IS something you can do: call this with method=off.',
     input_schema: {
       type: 'object',
       properties: {
@@ -1221,10 +1221,12 @@ async function executeOwnerTool(toolName, input, business) {
         const { error: e2 } = await supabase.from('businesses').update({ payment_link: pay.stored }).eq('id', business.id)
         if (e2) return `I couldn't save that. Try again in a moment.`
         const how = pay.method === 'link' ? `get ${pay.stored}` : `are told to pay with ${pay.method} to ${pay.detail}`
-        return `Saved. For services with a deposit, clients ${how} and I'll text you when they say they've paid. Reply "confirm <name>" to lock it in.` + (business.stripe_account_connected ? ` Stripe is connected too, so card deposits still go through Stripe automatically.` : '')
+        if (business.stripe_account_connected && business.stripe_account_id) return `Saved ${pay.method === 'link' ? 'your payment link' : `your ${pay.method}`} as a backup. Stripe is connected, so clients pay deposits by card through Stripe and bookings confirm on their own; ${pay.method === 'link' ? 'the link' : pay.method} is only used if Stripe is ever disconnected. Say "remove ${pay.method === 'link' ? 'the payment link' : pay.method}" any time.`
+        return `Saved. For services with a deposit, clients ${how} and I'll text you when they say they've paid. Reply "confirm <name>" to lock it in.`
       }
+      const had = require('../utils/payments').payInstruction(business)
       await supabase.from('businesses').update({ payment_link: null }).eq('id', business.id)
-      return `Payment link removed.` + (business.stripe_account_connected ? ` Deposits still run through Stripe.` : ` Deposits are off until you connect Stripe or give me a new link.`)
+      return `${had ? `${had.method === 'link' ? 'Payment link' : had.method} removed.` : 'No payment link or handle was saved.'}` + (business.stripe_account_connected ? ` Deposits run through Stripe by card.` : ` Deposits are off until you connect Stripe or give me a new way to pay.`)
     }
 
     case 'set_policy': {
@@ -1784,6 +1786,7 @@ You can help them:
 - Change weekly hours by text (set_hours), add staff (add_staff), remove staff (remove_staff)
 - Text one client on their behalf (message_client): "tell Jess I'm running 10 late"
 - Set the cancellation / late policy (set_policy): "24 hour cancellation policy, late cancels lose the deposit"
+- Change how deposits are collected (set_deposit_method): connect Stripe, save a Zelle phone/email, Venmo @handle, Cash App $cashtag or payment link, or remove one ("remove Zelle" = method off)
 - Take over a client's thread or hand it back (client_handoff): "I've got Jess" / "take Jess back" / "who am I handling"
 - Bring over appointments from their old booking app — calendar link or screenshots (import_appointments), keep that calendar syncing or stop it (calendar_sync), add a phone number to an imported client (attach_client_phone)
 
