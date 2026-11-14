@@ -320,6 +320,6 @@ Infrastructure
 
 ## 83. A client's bookings are found however the owner typed the number (v212)
 - Root cause of "I booked her and the bot said she had nothing": the dashboard saved customer_phone exactly as typed ("760-604-1791") while Twilio reports "+17606041791", and every lookup was an exact match. Three layers now: utils/phone.js phoneVariants() on every customer_phone read in the bot (webhook, conversationEngine, db/client), normalizePhone() on every dashboard write (New appointment, Add customer), and normalize-phones.sql (backfill + BEFORE INSERT/UPDATE trigger on appointments.customer_phone and customers.phone). sendSMS normalizes `to` as well. Never add a bare .eq('customer_phone', x) read again.
-- getAppointmentByCustomer uses the business's local date (not UTC) and includes deposit_pending.
+- getAppointmentByCustomer uses the business's local date (not UTC) and includes deposit_pending. The client prompt carries the client's own upcoming appointments (THIS CLIENT'S UPCOMING APPOINTMENTS), so "what do I have next week" is answered from the calendar, and an empty list makes the bot say it does not see one rather than guess.
 - getAppointmentsByDate counts deposit_pending, pending_approval and quote_sent as holding the slot, so a second client is never offered a time that is waiting on a deposit or the owner's OK.
 - getAvailableSlots returns no slots on a fully blocked date, on every path (check_availability, create_appointment, reschedule, owner book_client).

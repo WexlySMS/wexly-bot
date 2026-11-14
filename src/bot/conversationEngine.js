@@ -93,7 +93,17 @@ function localToUtcTZ(local, tz) {
   } catch (e) { return null }
 }
 
-function buildSystemPrompt(business, profile, today, returningCustomer = null) {
+function buildSystemPrompt(business, profile, today, returningCustomer = null, upcoming = []) {
+  // v212: the client's own upcoming bookings are in the prompt, so "what do I
+  // have next week" is answered from facts, not from whether the model
+  // remembered to call get_existing_appointment.
+  const upcomingBlock = upcoming.length ? `## THIS CLIENT'S UPCOMING APPOINTMENTS (from the calendar, authoritative)
+${upcoming.map(a => `- ${formatDate(a.appointment_date)} at ${formatTime(String(a.appointment_time || '').slice(0, 5))}: ${a.service_name || 'Appointment'}${a.staff_name ? ` with ${a.staff_name}` : ''} (${a.status === 'deposit_pending' ? 'waiting on deposit' : a.status === 'pending_approval' ? 'waiting on approval' : a.status === 'quote_sent' ? 'quote sent' : 'confirmed'})`).join('\n')}
+When they ask what they have booked, answer from this list. Use get_existing_appointment only to get the appointment_id before rescheduling or cancelling.
+` : `## THIS CLIENT'S UPCOMING APPOINTMENTS
+None on the calendar. If they believe they have one, say you don't see it and offer to book it or have the owner check.
+`
+
   const persona = personas[business.business_type] || personas.other
   const tone = toneInstructions[business.bot_tone] || toneInstructions.friendly
   const greeting = business.bot_greeting ||
@@ -292,6 +302,7 @@ For multiple services (e.g. cut + color): the same staff member handles both bac
 ## OPENING GREETING (use for brand new conversations only)
 "${greeting}"
 
+${upcomingBlock}
 ${returningCustomer ? `## RETURNING CUSTOMER — IMPORTANT
 You already know this customer:
 - Name: ${returningCustomer.customer_name}
@@ -1983,7 +1994,9 @@ async function handleIncomingMessage({ business, customerPhone, incomingText, me
     session.messages = session.messages.slice(-30)
   }
 
-  const systemPrompt = buildSystemPrompt(business, profile, today, returningCustomer)
+  let upcomingForPrompt = []
+  try { upcomingForPrompt = (await db.getAppointmentByCustomer(business.id, customerPhone, business.timezone)).filter(a => !['cancelled', 'rescheduled'].includes(a.status)) } catch (e) { console.error('[Bot] upcoming lookup failed:', e.message) }
+  const systemPrompt = buildSystemPrompt(business, profile, today, returningCustomer, upcomingForPrompt)
   const messagesForAPI = session.messages.map(m => ({ role: m.role, content: m.content }))
   let finalResponse = null
   let loopCount = 0
