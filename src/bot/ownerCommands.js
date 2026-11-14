@@ -289,7 +289,7 @@ const OWNER_TOOLS = [
       type: 'object',
       properties: {
         method: { type: 'string', enum: ['stripe', 'link', 'off'] },
-        payment_link: { type: 'string', description: 'The payment URL when method=link' }
+        payment_link: { type: 'string', description: 'When method=link: the payment URL, or the Zelle phone/email, Venmo @handle or Cash App $cashtag exactly as the owner wrote it (e.g. "zelle 760-555-0142", "@cielle", "$cielle")' }
       },
       required: ['method']
     }
@@ -1232,12 +1232,12 @@ async function executeOwnerTool(toolName, input, business) {
         } catch (e) { console.error('[Owner] stripe link failed:', e.message); return `I couldn't make your Stripe link just now. You can connect Stripe in your dashboard under Billing.` }
       }
       if (input.method === 'link') {
-        const raw = String(input.payment_link || '').trim()
-        if (!raw) return `Send me the link clients should pay at, like venmo.com/yourname or a Square or PayPal link.`
-        const link = /^https?:\/\//i.test(raw) ? raw : 'https://' + raw
-        const { error: e2 } = await supabase.from('businesses').update({ payment_link: link }).eq('id', business.id)
-        if (e2) return `I couldn't save that link. Try again in a moment.`
-        return `Saved. For services with a deposit, clients get ${link} and I'll text you when they say they've paid. Reply "confirm <name>" to lock it in.` + (business.stripe_account_connected ? ` Stripe is connected too, so card deposits still go through Stripe automatically.` : '')
+        const pay = require('../utils/payments').parsePayInstruction(input.payment_link)
+        if (!pay) return `Send me where clients should pay: your Zelle phone or email, Venmo @handle, Cash App $cashtag, or a payment link.`
+        const { error: e2 } = await supabase.from('businesses').update({ payment_link: pay.stored }).eq('id', business.id)
+        if (e2) return `I couldn't save that. Try again in a moment.`
+        const how = pay.method === 'link' ? `get ${pay.stored}` : `are told to pay with ${pay.method} to ${pay.detail}`
+        return `Saved. For services with a deposit, clients ${how} and I'll text you when they say they've paid. Reply "confirm <name>" to lock it in.` + (business.stripe_account_connected ? ` Stripe is connected too, so card deposits still go through Stripe automatically.` : '')
       }
       await supabase.from('businesses').update({ payment_link: null }).eq('id', business.id)
       return `Payment link removed.` + (business.stripe_account_connected ? ` Deposits still run through Stripe.` : ` Deposits are off until you connect Stripe or give me a new link.`)

@@ -411,7 +411,7 @@ function stepNeeded(biz, services, step, ctx = {}) {
   const anyDeposit = services.some(sv => sv.deposit_amount && String(sv.deposit_amount).trim() !== '' && String(sv.deposit_amount) !== '0')
   const hasHours = Array.isArray(biz.hours) && biz.hours.some(h => h && (h.open === true || (h.open && h.close)))
   const hasStaff = Array.isArray(biz.staff_members) && biz.staff_members.some(st => st && st.name)
-  const hasDepositMethod = (biz.stripe_account_connected && biz.stripe_account_id) || /^https?:\/\//i.test(String(biz.payment_link || ''))
+  const hasDepositMethod = (biz.stripe_account_connected && biz.stripe_account_id) || require('../utils/payments').hasPayMethod(biz)
   if (step === 'import_mode') return services.length > 0 && !ob.import_mode
   if (step === 'deposits') return services.length > 0
   // Counted from the first question (so the "(n of N)" total never grows mid-setup); dropped once deposits are decided and none are set.
@@ -437,7 +437,7 @@ function questionFor(biz, step, services, label = '') {
   switch (step) {
     case 'import_mode': return `${label}Book instantly, or approve each booking first? Reply INSTANT or APPROVE.`
     case 'deposits': return `${label}Any deposits? Reply NO, or like "Balayage $50" or "all $25".`
-    case 'deposit_method': return `${label}Collect deposits by card? Reply STRIPE for a connect link, or paste your Venmo, Zelle, Square or PayPal link.`
+    case 'deposit_method': return `${label}How should clients pay deposits? Reply STRIPE for a card link, or send your Zelle phone or email, Venmo @handle, Cash App $cashtag, or a payment link.`
     case 'hours': return `${label}${biz.onboarding?.auto_import ? 'No hours on your page. ' : ''}Your hours? Like "Tue to Sat 9 to 6".${SKIP_TAIL}`
     case 'staff': return `${label}Just you, or who else takes appointments? Reply JUST ME, or names like "Mia, Jordan".`
     case 'bookings': {
@@ -458,7 +458,7 @@ function shortQuestion(biz, step) {
   switch (step) {
     case 'import_mode': return `Still on setup: book instantly or approve each one first? Reply INSTANT or APPROVE.`
     case 'deposits': return `Still on setup: any deposits? Reply NO, or like "Balayage $50".`
-    case 'deposit_method': return `Still on setup: deposits by STRIPE, or paste your payment link?`
+    case 'deposit_method': return `Still on setup: deposits by STRIPE, or your Zelle, Venmo, Cash App or payment link?`
     case 'hours': return `Still on setup: what are your hours? (Or SKIP.)`
     case 'staff': return `Still on setup: just you, or who else takes appointments?`
     case 'bookings': return `Still on setup: want your upcoming appointments brought over? Text me your calendar link or screenshots, or SKIP.`
@@ -717,7 +717,9 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
   }
 
   if (pq.kind === 'deposit_method') {
-    const url = (t.match(/https?:\/\/\S+/i) || [])[0] || (t.match(/\b(?:venmo\.com|cash\.app|paypal\.me|square\.link|squareup\.com|zelle)\S*/i) || [])[0]
+    const pay = require('../utils/payments').parsePayInstruction(t)
+    const url = pay && pay.method === 'link' ? pay.stored : null
+    if (mediaUrls && mediaUrls.length && !pay) { await say(`QR codes don't work over text. Send the phone number or email on your Zelle (or your Venmo @handle), and I'll give that to clients.`); return '__sent__' }
     if (/^\s*stripe\s*[.!]*\s*$/i.test(t) || /\bconnect stripe\b/i.test(t)) {
       try {
         const link = await stripeConnectUrl(biz)
@@ -726,11 +728,11 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
         await advanceSetup(biz, 'deposit_method'); return '__sent__'
       } catch (e) { console.error('[Setup] stripe link failed:', e.message); await say(`I couldn't make your Stripe link just now. You can connect Stripe from your dashboard under Billing, or paste a payment link here instead.`); return '__sent__' }
     }
-    if (url) {
-      const link = /^https?:\/\//i.test(url) ? url : 'https://' + url
-      await supabase.from('businesses').update({ payment_link: link }).eq('id', biz.id)
-      await say(`Saved. Clients get ${link} when they book a service with a deposit. I'll text you when they say they've paid; reply "confirm <name>" to lock it in.`)
-      await setPending(biz, null, { deposit_method: 'link', deposit_method_at: new Date().toISOString() })
+    if (pay) {
+      await supabase.from('businesses').update({ payment_link: pay.stored }).eq('id', biz.id)
+      const how = pay.method === 'link' ? `get ${pay.stored}` : `are told to pay with ${pay.method} to ${pay.detail}`
+      await say(`Saved. Clients ${how} when they book a service with a deposit. I'll text you when they say they've paid; reply "confirm <name>" to lock it in.${pay.assumed ? ' I took that as Zelle; if it is Venmo or Cash App, just say so.' : ''}`)
+      await setPending(biz, null, { deposit_method: pay.method === 'link' ? 'link' : pay.method.toLowerCase().replace(/\s+/g, ''), deposit_method_at: new Date().toISOString() })
       await advanceSetup(biz, 'deposit_method'); return '__sent__'
     }
     if (NO_RE.test(t)) { await say(`No problem. Deposits stay off until you connect Stripe or send me a payment link.`); await setPending(biz, null, { deposit_method_at: new Date().toISOString(), deposit_method_skipped: true }); await advanceSetup(biz, 'deposit_method'); return '__sent__' }

@@ -323,3 +323,6 @@ Infrastructure
 - getAppointmentByCustomer uses the business's local date (not UTC) and includes deposit_pending. The client prompt carries the client's own upcoming appointments (THIS CLIENT'S UPCOMING APPOINTMENTS), so "what do I have next week" is answered from the calendar, and an empty list makes the bot say it does not see one rather than guess.
 - getAppointmentsByDate counts deposit_pending, pending_approval and quote_sent as holding the slot, so a second client is never offered a time that is waiting on a deposit or the owner's OK.
 - getAvailableSlots returns no slots on a fully blocked date, on every path (check_availability, create_appointment, reschedule, owner book_client).
+
+## 84. Deposits by Zelle, Venmo or Cash App, not only by link (v213)
+- Zelle has no payment links (QR codes and phone/email only), so businesses.payment_link may hold a URL or "Method: detail" text ("Zelle: 760-555-0142", "Venmo: @cielle", "Cash App: $cielle"). utils/payments.js parses what the owner types (setup, set_deposit_method, dashboard field) and renders the client-facing sentence ("Pay with Zelle to 760-555-0142 (Cielle Studio)"). A bare phone or email is taken as Zelle and the owner is told so. A QR photo during setup gets "QR codes don't work over text; send the phone or email on your Zelle."

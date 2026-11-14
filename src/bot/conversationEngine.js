@@ -482,7 +482,8 @@ async function tryCreateDepositForAppointment({ business, appointment, service, 
 
     // v204: no Stripe but a payment link (Venmo, Zelle, Square, PayPal) set by the owner →
     // manual deposit. The client pays at the link and replies PAID; the owner confirms it.
-    const manualLink = (!business?.stripe_account_connected || !business?.stripe_account_id) && typeof business?.payment_link === 'string' && /^https?:\/\//i.test(business.payment_link.trim()) ? business.payment_link.trim() : null
+    const manualPay = (!business?.stripe_account_connected || !business?.stripe_account_id) ? require('../utils/payments').payInstruction(business) : null
+    const manualLink = manualPay ? manualPay.detail : null
     if (!manualLink && (!business?.stripe_account_connected || !business?.stripe_account_id)) {
       console.log(`${tag} skip — Stripe not connected on business and no payment link`)
       return result
@@ -545,7 +546,7 @@ async function tryCreateDepositForAppointment({ business, appointment, service, 
       const expiresAtM = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString()
       const firstNameM = (customerName || appointment.customer_name || 'there').split(' ')[0] || 'there'
       const ownerFirst = (business.owner_name || '').split(' ')[0]
-      result.depositText = `\n\nTo secure your spot, a $${(depositCents / 100).toFixed(2)} deposit is due within the next 4 hours. Pay here: ${manualLink}\n\nReply PAID once it's sent and ${ownerFirst || 'we'} will confirm your booking, ${firstNameM}.`
+      result.depositText = `\n\nTo secure your spot, a $${(depositCents / 100).toFixed(2)} deposit is due within the next 4 hours. Pay ${manualPay.text}.\n\nReply PAID once it's sent and ${ownerFirst || 'we'} will confirm your booking, ${firstNameM}.`
       result.depositCreated = true
       await sbM.from('appointments').update({ status: 'deposit_pending', deposit_status: 'pending', deposit_expires_at: expiresAtM, deposit_payment_mode: 'manual', deposit_pay_url: manualLink, deposit_amount: depositCents, deposit_text: result.depositText }).eq('id', appointment.id)
       console.log(`${tag} manual deposit: ${depositCents}¢ via owner link`)
