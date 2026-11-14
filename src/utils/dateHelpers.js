@@ -58,6 +58,9 @@ function getAvailableSlotsRaw(business, date, existingAppts, serviceDuration = 6
     minStartMins = Math.ceil(earliest / 30) * 30
   }
 
+  // A fully blocked day (holiday, vacation) has no slots at all, whichever path asks.
+  if ((blockedDates || []).some(b => b.blocked_date === date && !b.start_time)) return []
+
   // Check partial blocked times
   const partialBlocks = (blockedDates || []).filter(b =>
     b.blocked_date === date && b.start_time && b.end_time

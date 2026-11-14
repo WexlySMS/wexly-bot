@@ -1,4 +1,5 @@
 const express = require('express')
+const { phoneVariants } = require('../utils/phone')
 const router = express.Router()
 const twilio = require('twilio')
 const db = require('../db/client')
@@ -56,7 +57,7 @@ async function cancelByKeyword(biz, customerPhone) {
   const sb = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
   const tz = biz.timezone || 'America/Los_Angeles'
   const today = new Date().toLocaleDateString('en-CA', { timeZone: tz })
-  const { data: appt } = await sb.from('appointments').select('*').eq('business_id', biz.id).eq('customer_phone', customerPhone)
+  const { data: appt } = await sb.from('appointments').select('*').eq('business_id', biz.id).in('customer_phone', phoneVariants(customerPhone))
     .in('status', ['confirmed', 'pending', 'deposit_pending', 'pending_approval']).gte('appointment_date', today)
     .order('appointment_date', { ascending: true }).order('appointment_time', { ascending: true }).limit(1).maybeSingle()
   if (!appt) return false
@@ -189,14 +190,14 @@ let flushDebounced = async function (key) {
       .from('conversation_sessions')
       .select('manual_mode, manual_mode_until')
       .eq('business_id', business.id)
-      .eq('customer_phone', customerPhone)
+      .in('customer_phone', phoneVariants(customerPhone))
       .maybeSingle()
     if (session?.manual_mode && (!session.manual_mode_until || new Date() < new Date(session.manual_mode_until))) {
       console.log(`[Debounce] ${customerPhone} — manual mode active, saving message but NOT auto-replying`)
       // Still persist the customer's message so the owner sees it in the thread.
       try {
         const { data: full } = await sb.from('conversation_sessions')
-          .select('messages').eq('business_id', business.id).eq('customer_phone', customerPhone).maybeSingle()
+          .select('messages').eq('business_id', business.id).in('customer_phone', phoneVariants(customerPhone)).maybeSingle()
         const msgs = Array.isArray(full?.messages) ? full.messages : []
         msgs.push({ role: 'user', content: combinedText, media: mediaUrls.length ? mediaUrls : undefined, timestamp: new Date().toISOString() })
         await sb.from('conversation_sessions').upsert({
@@ -461,7 +462,7 @@ router.post('/sms', validateTwilio, async (req, res) => {
         const sb2 = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
         const { data: appt } = await sb2.from('appointments')
           .select('*').eq('business_id', business.id)
-          .eq('customer_phone', customerPhone)
+          .in('customer_phone', phoneVariants(customerPhone))
           .eq('appointment_date', today)
           .eq('status', 'confirmed')
           .order('appointment_time').limit(1).maybeSingle()
@@ -624,7 +625,7 @@ router.post('/sms', validateTwilio, async (req, res) => {
       try {
         const sbDep = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
         const { data: dep } = await sbDep.from('appointments').select('id, customer_name, service_name, appointment_date, appointment_time, deposit_amount')
-          .eq('business_id', business.id).eq('customer_phone', customerPhone).eq('status', 'deposit_pending').eq('deposit_status', 'pending').eq('deposit_payment_mode', 'manual')
+          .eq('business_id', business.id).in('customer_phone', phoneVariants(customerPhone)).eq('status', 'deposit_pending').eq('deposit_status', 'pending').eq('deposit_payment_mode', 'manual')
           .order('created_at', { ascending: false }).limit(1).maybeSingle()
         if (dep) {
           await sbDep.from('appointments').update({ deposit_status: 'reported', deposit_expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() }).eq('id', dep.id)
@@ -680,7 +681,7 @@ router.post('/sms', validateTwilio, async (req, res) => {
       .from('conversation_sessions')
       .select('manual_mode, manual_mode_until')
       .eq('business_id', business.id)
-      .eq('customer_phone', customerPhone)
+      .in('customer_phone', phoneVariants(customerPhone))
       .maybeSingle()
 
     if (session?.manual_mode) {
@@ -688,7 +689,7 @@ router.post('/sms', validateTwilio, async (req, res) => {
         await sb3.from('conversation_sessions')
           .update({ manual_mode: false, manual_mode_until: null })
           .eq('business_id', business.id)
-          .eq('customer_phone', customerPhone)
+          .in('customer_phone', phoneVariants(customerPhone))
       } else {
         console.log(`[SMS] Manual mode active for ${customerPhone} — bot silent, saving customer message`)
         // CRITICAL: save the customer's incoming message so the owner sees it in
@@ -697,7 +698,7 @@ router.post('/sms', validateTwilio, async (req, res) => {
         // without saving here the message is lost entirely.
         try {
           const { data: full } = await sb3.from('conversation_sessions')
-            .select('messages').eq('business_id', business.id).eq('customer_phone', customerPhone).maybeSingle()
+            .select('messages').eq('business_id', business.id).in('customer_phone', phoneVariants(customerPhone)).maybeSingle()
           const msgs = Array.isArray(full?.messages) ? full.messages : []
           msgs.push({ role: 'user', content: incomingText, media: (mediaUrls && mediaUrls.length) ? mediaUrls : undefined, timestamp: new Date().toISOString() })
           await sb3.from('conversation_sessions').upsert({

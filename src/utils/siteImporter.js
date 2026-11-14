@@ -300,14 +300,15 @@ const ADAPTERS = [
 // subpages before giving up.
 async function discoverSubpages(html, base) {
   const found = new Set()
-  for (const m of html.matchAll(/<a[^>]+href=["']([^"'#?]+)["'][^>]*>([\s\S]{0,80}?)<\/a>/gi)) {
-    const href = m[1], label = decode(m[2].replace(/<[^>]+>/g, ' '))
-    if (/services?|menu|pricing|prices?|price-list|treatments?|book/i.test(href + ' ' + label)) { const u = abs(base, href); if (u && new URL(u).origin === new URL(base).origin && u.replace(/\/$/, '') !== base.replace(/\/$/, '')) found.add(u) }
-    if (found.size >= 3) break
-  }
-  const pages = []
-  for (const u of found) { try { const r = await fetchText(u); if (r.ok && /html/i.test(r.contentType)) pages.push(r.body) } catch { /* skip */ } }
-  return pages
+  const links = [...html.matchAll(/<a[^>]+href=["']([^"'#?]+)["'][^>]*>([\s\S]{0,80}?)<\/a>/gi)].map(m => ({ href: m[1], label: decode(m[2].replace(/<[^>]+>/g, ' ')) }))
+  const same = href => { const u = abs(base, href); return u && new URL(u).origin === new URL(base).origin && u.replace(/\/$/, '') !== base.replace(/\/$/, '') ? u : null }
+  // Services / menu pages first (what we came for), then the pages hours and the team usually live on.
+  for (const { href, label } of links) { if (/services?|menu|pricing|prices?|price-list|treatments?|book/i.test(href + ' ' + label)) { const u = same(href); if (u) found.add(u) } if (found.size >= 3) break }
+  for (const { href, label } of links) { if (/contact|hours|location|visit|about|our-team|team|staff|meet/i.test(href + ' ' + label)) { const u = same(href); if (u) found.add(u) } if (found.size >= 5) break }
+  // An own-site /services link usually means the hours are on the home page.
+  try { const root = new URL(base).origin + '/'; if (root.replace(/\/$/, '') !== base.replace(/\/$/, '') && found.size < 6) found.add(root) } catch { /* ignore */ }
+  const results = await Promise.allSettled([...found].map(u => fetchText(u)))
+  return results.filter(r => r.status === 'fulfilled' && r.value.ok && /html/i.test(r.value.contentType)).map(r => r.value.body)
 }
 
 // Extraction schema. Everything optional; the model must not invent.
@@ -334,6 +335,7 @@ const TOOL = {
         deposit: { type: 'string', description: 'Deposit amount if stated, number only' },
         by_request: { type: 'boolean', description: 'true if the page says consultation required / price on request' }
       }, required: ['name'] } },
+      staff: { type: 'array', description: 'People who take appointments, if the page lists a team (stylists, artists, providers, barbers). Only names that appear on the page.', items: { type: 'object', properties: { name: { type: 'string' }, role: { type: 'string', description: 'Title as written, e.g. Stylist, Injector' } }, required: ['name'] } },
       policies: { type: 'string', description: 'Cancellation, deposit, late, no-show policy text from the page, cleaned, up to ~800 chars' },
       social: { type: 'object', properties: { instagram: { type: 'string', description: 'handle without @ or full URL' }, tiktok: { type: 'string' }, facebook: { type: 'string' }, yelp: { type: 'string' }, google: { type: 'string' }, website: { type: 'string' } } },
       logo: { type: 'string', description: 'URL from the candidate image list that is the logo, if any' },
@@ -381,6 +383,7 @@ function clean(data, baseUrl) {
   })).filter(s => s.name)
   // de-dupe by name
   const seen = new Set(); d.services = d.services.filter(s => { const k = s.name.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true })
+  if (Array.isArray(d.staff)) { const seenS = new Set(); d.staff = d.staff.map(x => ({ name: String(x?.name || '').replace(/\s+/g, ' ').trim().slice(0, 60), role: x?.role ? String(x.role).trim().slice(0, 40) : undefined })).filter(x => /^[A-Za-z][A-Za-z.'\- ]{1,59}$/.test(x.name) && !seenS.has(x.name.toLowerCase()) && seenS.add(x.name.toLowerCase())).slice(0, 25); if (!d.staff.length) delete d.staff } else delete d.staff
   for (const k of ['logo', 'cover']) if (d[k]) { d[k] = abs(baseUrl, d[k]); if (!/^https?:/.test(d[k] || '')) delete d[k] }
   d.photos = (Array.isArray(d.photos) ? d.photos : []).map(u => abs(baseUrl, u)).filter(u => u && /^https?:/.test(u) && u !== d.logo).slice(0, 12)
   if (d.social && typeof d.social === 'object') { const soc = {}; for (const k of ['instagram', 'tiktok', 'facebook', 'yelp', 'google', 'website']) if (d.social[k]) soc[k] = String(d.social[k]).trim().replace(/^@/, '').slice(0, 200); d.social = soc } else d.social = {}
@@ -420,6 +423,7 @@ async function importFromUrl(rawUrl) {
   } catch (err) { return { error: `Could not read the page: ${err.message}` } }
   if (!data.services.length) warnings.push('No services found on this page. If their menu is on another page, import that URL too.')
   if (!data.hours) warnings.push('No hours found on this page.')
+  if (!data.staff) warnings.push('No team names found on this page.')
   if (data.notes) warnings.push(data.notes)
   console.log(`[Import] ${url}: ${data.services.length} services, hours=${!!data.hours}, photos=${data.photos.length}, platform=${data.platform || '?'}`)
   return { source: page.finalUrl || url, bytes: page.bytes, ...data, warnings }
@@ -445,8 +449,8 @@ async function rehost(businessId, url, kind) {
 // serviceNames: optional allow-list of service names to write.
 async function applyImport(businessId, data, options = {}) {
   const opt = { services: true, hours: true, profile: true, photos: true, ...options }
-  const result = { services: { added: [], updated: [] }, hours: false, profile: [], photos: 0, logo: false, cover: false }
-  const { data: biz } = await supabase.from('businesses').select('id, business_name, hours, profile_description, profile_about, profile_policies, address, logo_url, profile_cover_url, profile_social, profile_photos, business_type, timezone, profile_slug').eq('id', businessId).maybeSingle()
+  const result = { services: { added: [], updated: [] }, hours: false, staff: [], profile: [], photos: 0, logo: false, cover: false }
+  const { data: biz } = await supabase.from('businesses').select('id, business_name, hours, staff_members, profile_description, profile_about, profile_policies, address, logo_url, profile_cover_url, profile_social, profile_photos, business_type, timezone, profile_slug').eq('id', businessId).maybeSingle()
   if (!biz) throw new Error('Business not found')
 
   if (opt.services && Array.isArray(data.services) && data.services.length) {
@@ -468,6 +472,11 @@ async function applyImport(businessId, data, options = {}) {
 
   const upd = {}
   if (opt.hours && data.hours) { upd.hours = data.hours; result.hours = true }
+  // Team from the page, only when the account has no staff yet (never overwrite what the owner set up).
+  if (opt.staff !== false && Array.isArray(data.staff) && data.staff.length && !(Array.isArray(biz.staff_members) && biz.staff_members.some(st => st && st.name))) {
+    upd.staff_members = data.staff.map(st => ({ id: require('crypto').randomUUID(), name: st.name, role: st.role || null, services: [] }))
+    result.staff = data.staff.map(st => st.name)
+  }
   if (opt.profile) {
     if (data.tagline && !biz.profile_description) { upd.profile_description = data.tagline; result.profile.push('tagline') }
     if (data.about && !biz.profile_about) { upd.profile_about = data.about; result.profile.push('about') }
@@ -491,7 +500,7 @@ async function applyImport(businessId, data, options = {}) {
     if (error) throw error
   }
   try { await require('../bot/trialOnboarding').ensureProfileSlug(biz) } catch { /* non-fatal */ }
-  console.log(`[Import] applied to ${biz.business_name}: +${result.services.added.length} ~${result.services.updated.length} services, hours=${result.hours}, profile=${result.profile.join('/') || '-'}, photos=${result.photos}`)
+  console.log(`[Import] applied to ${biz.business_name}: +${result.services.added.length} ~${result.services.updated.length} services, hours=${result.hours}, staff=${result.staff.length}, profile=${result.profile.join('/') || '-'}, photos=${result.photos}`)
   return result
 }
 

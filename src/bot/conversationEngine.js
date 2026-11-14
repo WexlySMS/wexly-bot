@@ -1,4 +1,5 @@
 const Anthropic = require('@anthropic-ai/sdk')
+const { phoneVariants } = require('../utils/phone')
 const { sendBookingNotification, sendEscalationNotification, sendCustomerConfirmationEmail } = require('../utils/emailService')
 const { runQualificationFlow, runIntakeFlow, shouldSendNotification } = require('./proFeatures')
 const { getAvailableSlots, findAvailableStaff, formatDate, formatTime, applyServiceWindow, serviceWindowText } = require('../utils/dateHelpers')
@@ -895,7 +896,7 @@ async function executeTool(toolName, input, context) {
         const { data: existingDup } = await sbDup.from('appointments')
           .select('id, status')
           .eq('business_id', business.id)
-          .eq('customer_phone', customerPhone)
+          .in('customer_phone', phoneVariants(customerPhone))
           .eq('appointment_date', input.date)
           .eq('appointment_time', input.time)
           .in('status', ['confirmed', 'deposit_pending', 'pending_approval', 'pending'])
@@ -1224,7 +1225,7 @@ async function executeTool(toolName, input, context) {
     }
 
     case 'get_existing_appointment': {
-      const appts = await db.getAppointmentByCustomer(business.id, customerPhone)
+      const appts = await db.getAppointmentByCustomer(business.id, customerPhone, business.timezone)
       if (!appts.length) return { found: false, message: 'No upcoming appointments found.' }
       return {
         found: true,
@@ -1248,7 +1249,7 @@ async function executeTool(toolName, input, context) {
       const todayR = new Date().toLocaleDateString('en-CA', { timeZone: tzR })
       let appt = null
       if (input.appointment_id) ({ data: appt } = await sbR.from('appointments').select('*').eq('id', input.appointment_id).eq('business_id', business.id).maybeSingle())
-      if (!appt) ({ data: appt } = await sbR.from('appointments').select('*').eq('business_id', business.id).eq('customer_phone', customerPhone).in('status', ['confirmed', 'deposit_pending', 'pending_approval', 'pending']).gte('appointment_date', todayR).order('appointment_date', { ascending: true }).order('appointment_time', { ascending: true }).limit(1).maybeSingle())
+      if (!appt) ({ data: appt } = await sbR.from('appointments').select('*').eq('business_id', business.id).in('customer_phone', phoneVariants(customerPhone)).in('status', ['confirmed', 'deposit_pending', 'pending_approval', 'pending']).gte('appointment_date', todayR).order('appointment_date', { ascending: true }).order('appointment_time', { ascending: true }).limit(1).maybeSingle())
       if (!appt) return { success: false, error: 'No upcoming appointment found to move. Ask which appointment they mean, or offer to book a new one.' }
       const newDate = String(input.new_date || ''), newTime = String(input.new_time || '').slice(0, 5)
       if (!/^\d{4}-\d{2}-\d{2}$/.test(newDate) || !/^\d{2}:\d{2}$/.test(newTime)) return { success: false, error: 'Need the new date (YYYY-MM-DD) and time (HH:MM).' }
@@ -1307,7 +1308,7 @@ async function executeTool(toolName, input, context) {
         const { data: fallbackAppt } = await sbCancel.from('appointments')
           .select('*')
           .eq('business_id', business.id)
-          .eq('customer_phone', customerPhone)
+          .in('customer_phone', phoneVariants(customerPhone))
           .in('status', ['confirmed', 'deposit_pending', 'pending_approval'])
           .gte('appointment_date', todayC)
           .order('appointment_date', { ascending: true })
@@ -1498,7 +1499,7 @@ async function executeTool(toolName, input, context) {
       const { data: recentAppt } = await sb.from('appointments')
         .select('*')
         .eq('business_id', business.id)
-        .eq('customer_phone', customerPhone)
+        .in('customer_phone', phoneVariants(customerPhone))
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle()
@@ -1672,7 +1673,7 @@ async function handleIncomingMessage({ business, customerPhone, incomingText, me
   // ── Check if customer is responding to a quote ────────────────────────────
   const sbQuote = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
   const { data: quotedAppt } = await sbQuote.from('appointments')
-    .select('*').eq('business_id', business.id).eq('customer_phone', customerPhone)
+    .select('*').eq('business_id', business.id).in('customer_phone', phoneVariants(customerPhone))
     .eq('status', 'quote_sent').order('created_at', { ascending: false }).limit(1)
     .maybeSingle()
 
@@ -1790,7 +1791,7 @@ async function handleIncomingMessage({ business, customerPhone, incomingText, me
       const { data: remindedAppt } = await sbRem.from('appointments')
         .select('*')
         .eq('business_id', business.id)
-        .eq('customer_phone', customerPhone)
+        .in('customer_phone', phoneVariants(customerPhone))
         .in('status', ['confirmed', 'deposit_pending'])
         .gte('appointment_date', today)
         .order('appointment_date', { ascending: true })

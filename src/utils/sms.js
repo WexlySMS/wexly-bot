@@ -63,6 +63,9 @@ async function sendSMS(from, to, body, mediaUrls) {
     console.log(`[SMS] Skipped — "${to}" is not a valid phone number (no real number on file)`)
     return { success: false, error: 'No valid phone number', skipped: true }
   }
+  // Owners type numbers every which way ("760-604-1791"); Twilio wants E.164.
+  // Normalizing here covers reminders, confirmations and every other send path.
+  to = require('./phone').toE164(to) || to
   const readyAt = (provisionedAt.get(from) || 0) + PROPAGATION_MS
   const hold = readyAt - Date.now()
   if (hold > 0) {

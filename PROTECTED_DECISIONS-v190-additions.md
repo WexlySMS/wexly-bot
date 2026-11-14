@@ -317,3 +317,9 @@ Infrastructure
 
 ## 82. Setup texts are short (v211)
 - Every setup message is one or two plain sentences: the question, the reply format, nothing else. The welcome names SKIP once and the HELP line once ("Text HELP and we will schedule setup assistance"), and the rest of the flow does not repeat either. Confirmations state what changed and stop. Do not pad setup texts with reassurance, timing estimates, or explanations of what the bot will do next.
+
+## 83. A client's bookings are found however the owner typed the number (v212)
+- Root cause of "I booked her and the bot said she had nothing": the dashboard saved customer_phone exactly as typed ("760-604-1791") while Twilio reports "+17606041791", and every lookup was an exact match. Three layers now: utils/phone.js phoneVariants() on every customer_phone read in the bot (webhook, conversationEngine, db/client), normalizePhone() on every dashboard write (New appointment, Add customer), and normalize-phones.sql (backfill + BEFORE INSERT/UPDATE trigger on appointments.customer_phone and customers.phone). sendSMS normalizes `to` as well. Never add a bare .eq('customer_phone', x) read again.
+- getAppointmentByCustomer uses the business's local date (not UTC) and includes deposit_pending.
+- getAppointmentsByDate counts deposit_pending, pending_approval and quote_sent as holding the slot, so a second client is never offered a time that is waiting on a deposit or the owner's OK.
+- getAvailableSlots returns no slots on a fully blocked date, on every path (check_availability, create_appointment, reschedule, owner book_client).

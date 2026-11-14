@@ -1,4 +1,5 @@
 const { createClient } = require('@supabase/supabase-js')
+const { phoneVariants } = require('../utils/phone')
 require('dotenv').config()
 
 const supabase = createClient(
@@ -48,7 +49,7 @@ async function getSession(businessId, customerPhone) {
     .from('conversation_sessions')
     .select('*')
     .eq('business_id', businessId)
-    .eq('customer_phone', customerPhone)
+    .in('customer_phone', phoneVariants(customerPhone))
     .maybeSingle()
   if (data && data.session_state && typeof data.session_state === 'object') {
     // Restore transient flow state onto the session object.
@@ -99,7 +100,9 @@ async function getAppointmentsByDate(businessId, date) {
     .select('*')
     .eq('business_id', businessId)
     .eq('appointment_date', date)
-    .in('status', ['pending', 'confirmed'])
+    // Every booking that is holding a slot: a deposit still being paid, a request the
+    // owner has not answered yet, and a quote out for approval all keep the time taken.
+    .in('status', ['pending', 'confirmed', 'deposit_pending', 'pending_approval', 'quote_sent'])
   return data || []
 }
 
@@ -124,15 +127,17 @@ async function updateAppointment(id, updates) {
   return data
 }
 
-async function getAppointmentByCustomer(businessId, customerPhone) {
-  const today = new Date().toISOString().split('T')[0]
-  // Get active upcoming appointments
+async function getAppointmentByCustomer(businessId, customerPhone, timezone = null) {
+  // "Today" in the business's own day, not UTC: after 4pm Pacific the UTC date
+  // has already rolled over and tonight's appointments would disappear.
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: timezone || 'America/New_York' })
+  // Get active upcoming appointments (a booking waiting on its deposit is still theirs)
   const { data: active } = await supabase
     .from('appointments')
     .select('*')
     .eq('business_id', businessId)
-    .eq('customer_phone', customerPhone)
-    .in('status', ['pending', 'confirmed', 'pending_approval', 'quote_sent'])
+    .in('customer_phone', phoneVariants(customerPhone))
+    .in('status', ['pending', 'confirmed', 'pending_approval', 'quote_sent', 'deposit_pending'])
     .gte('appointment_date', today)
     .order('appointment_date', { ascending: true })
     .limit(5)
@@ -144,7 +149,7 @@ async function getAppointmentByCustomer(businessId, customerPhone) {
     .from('appointments')
     .select('*')
     .eq('business_id', businessId)
-    .eq('customer_phone', customerPhone)
+    .in('customer_phone', phoneVariants(customerPhone))
     .in('status', ['cancelled', 'rescheduled'])
     .gte('created_at', weekAgo.toISOString())
     .order('appointment_date', { ascending: false })
@@ -268,7 +273,7 @@ async function getCustomerByPhone(businessId, customerPhone) {
     .from('appointments')
     .select('customer_name, customer_email, service_name, appointment_date')
     .eq('business_id', businessId)
-    .eq('customer_phone', customerPhone)
+    .in('customer_phone', phoneVariants(customerPhone))
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle()
@@ -288,7 +293,7 @@ async function getCustomerByPhone(businessId, customerPhone) {
         .from('appointments')
         .select('customer_email')
         .eq('business_id', businessId)
-        .eq('customer_phone', customerPhone)
+        .in('customer_phone', phoneVariants(customerPhone))
         .not('customer_email', 'is', null)
         .order('created_at', { ascending: false })
         .limit(1)

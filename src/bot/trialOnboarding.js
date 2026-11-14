@@ -351,6 +351,7 @@ async function announceImport(biz, result, { url = null } = {}) {
   const bits = []
   if (names.length) bits.push(`${names.length} service${names.length === 1 ? '' : 's'} (${list})`)
   if (result.hours) bits.push('your hours')
+  if (result.staff?.length) bits.push(`${result.staff.length} team member${result.staff.length === 1 ? '' : 's'} (${result.staff.slice(0, 3).join(', ')}${result.staff.length > 3 ? ' and more' : ''})`)
   if (result.photos) bits.push(`${result.photos} photo${result.photos === 1 ? '' : 's'}`)
   if (!bits.length) return null
   const page = fresh?.profile_slug ? `${SITE_URL}/book/${fresh.profile_slug}` : null
@@ -437,7 +438,7 @@ function questionFor(biz, step, services, label = '') {
     case 'import_mode': return `${label}Book instantly, or approve each booking first? Reply INSTANT or APPROVE.`
     case 'deposits': return `${label}Any deposits? Reply NO, or like "Balayage $50" or "all $25".`
     case 'deposit_method': return `${label}Collect deposits by card? Reply STRIPE for a connect link, or paste your Venmo, Zelle, Square or PayPal link.`
-    case 'hours': return `${label}Your hours? Like "Tue to Sat 9 to 6".${SKIP_TAIL}`
+    case 'hours': return `${label}${biz.onboarding?.auto_import ? 'No hours on your page. ' : ''}Your hours? Like "Tue to Sat 9 to 6".${SKIP_TAIL}`
     case 'staff': return `${label}Just you, or who else takes appointments? Reply JUST ME, or names like "Mia, Jordan".`
     case 'bookings': {
       const { bookingsQuestion, platformFromUrl } = require('../utils/calendarImporter')
