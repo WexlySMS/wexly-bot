@@ -1555,7 +1555,7 @@ async function handleStaffCallout(business, input) {
     .select('*').eq('business_id', business.id)
     .eq('staff_name', staff.name)
     .in('appointment_date', dates)
-    .in('status', ['confirmed', 'pending'])
+    .in('status', ['pending', 'confirmed', 'deposit_pending', 'pending_approval', 'quote_sent'])
 
   var reassigned = 0, notified = 0
   var otherStaff = staffMembers.filter(s => s.name !== staff.name && s.name)
@@ -1607,7 +1607,7 @@ async function handleRemoveStaff(business, input) {
     .select('*').eq('business_id', business.id)
     .eq('staff_name', removedName)
     .gte('appointment_date', today)
-    .in('status', ['confirmed', 'pending'])
+    .in('status', ['pending', 'confirmed', 'deposit_pending', 'pending_approval', 'quote_sent'])
 
   var otherStaff = staffMembers.filter((s, i) => i !== staffIdx && s.name)
   var reassigned = 0
@@ -1653,7 +1653,7 @@ async function handleReassignAppointments(business, input) {
   var query = supabase.from('appointments').select('*')
     .eq('business_id', business.id)
     .eq('staff_name', fromStaff.name)
-    .in('status', ['confirmed', 'pending'])
+    .in('status', ['pending', 'confirmed', 'deposit_pending', 'pending_approval', 'quote_sent'])
 
   if (input.date === 'this week') {
     var weekEnd = new Date(new Date().getTime() + 7 * 86400000)

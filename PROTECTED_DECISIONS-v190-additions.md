@@ -326,3 +326,7 @@ Infrastructure
 
 ## 84. Deposits by Zelle, Venmo or Cash App, not only by link (v213)
 - Zelle has no payment links (QR codes and phone/email only), so businesses.payment_link may hold a URL or "Method: detail" text ("Zelle: 760-555-0142", "Venmo: @cielle", "Cash App: $cielle"). utils/payments.js parses what the owner types (setup, set_deposit_method, dashboard field) and renders the client-facing sentence ("Pay with Zelle to 760-555-0142 (Cielle Studio)"). A bare phone or email is taken as Zelle and the owner is told so. A QR photo during setup gets "QR codes don't work over text; send the phone or email on your Zelle."
+
+## 85. One definition of "this slot is taken" (v214)
+- pending, confirmed, deposit_pending, pending_approval and quote_sent all hold a slot and all count as the client's booking. The public booking page, the bot, staff callouts/removal/reassignment and the "did they book yet" checks in the scheduler use the same list. A filter that only says ['pending','confirmed'] is a bug.
+- getBusinessProfile loads blocked dates from yesterday (UTC) forward so a block for today survives the UTC rollover at 4pm Pacific.

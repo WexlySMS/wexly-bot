@@ -933,7 +933,7 @@ async function sendAbandonedBookingReminders() {
         .select('id')
         .eq('business_id', session.business_id)
         .eq('customer_phone', session.customer_phone)
-        .in('status', ['confirmed', 'pending_approval', 'quote_sent'])
+        .in('status', ['pending', 'confirmed', 'deposit_pending', 'pending_approval', 'quote_sent'])
         .limit(1)
 
       if (appts?.length > 0) {
@@ -1277,7 +1277,7 @@ async function sendOwnerReminders() {
         // If they already booked after setting it, the reminder is now noise.
         const { data: booked } = await sb.from('appointments')
           .select('id').eq('business_id', r.business_id).eq('customer_phone', r.to_phone)
-          .in('status', ['confirmed', 'pending', 'pending_approval'])
+          .in('status', ['pending', 'confirmed', 'deposit_pending', 'pending_approval', 'quote_sent'])
           .gt('created_at', r.created_at).limit(1)
         if (booked?.length) {
           console.log(`[Reminders] Skipped ${r.to_phone} — already booked since setting it`)

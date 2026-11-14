@@ -24,7 +24,9 @@ async function getBusinessBySmsNumber(smsNumber, { includePaused = false } = {})
 
 // Load full business profile including services and FAQs
 async function getBusinessProfile(businessId) {
-  const today = new Date().toISOString().split('T')[0]
+  // One day of slack: this runs in UTC and the business may still be on yesterday's
+  // date locally, so a block for "today" must not fall off the list after 4pm Pacific.
+  const today = new Date(Date.now() - 86400000).toISOString().split('T')[0]
   const [services, faqs, blocked, promos, bundles] = await Promise.all([
     supabase.from('services').select('*').eq('business_id', businessId).neq('active', false).order('sort_order'),
     supabase.from('faqs').select('*').eq('business_id', businessId).order('sort_order'),

@@ -2822,7 +2822,7 @@ app.get('/public/availability/:slug', async (req, res) => {
     // Get existing appointments and blocked dates
     const { data: existing } = await supabase
       .from('appointments').select('*').eq('business_id', biz.id)
-      .eq('appointment_date', date).in('status', ['pending', 'confirmed'])
+      .eq('appointment_date', date).in('status', ['pending', 'confirmed', 'deposit_pending', 'pending_approval', 'quote_sent'])
 
     const { data: blocked } = await supabase
       .from('blocked_dates').select('*').eq('business_id', biz.id)
@@ -2896,7 +2896,7 @@ app.post('/public/book/:slug', async (req, res) => {
     // Verify slot is still available
     const { data: existing } = await supabase
       .from('appointments').select('*').eq('business_id', biz.id)
-      .eq('appointment_date', date).in('status', ['pending', 'confirmed'])
+      .eq('appointment_date', date).in('status', ['pending', 'confirmed', 'deposit_pending', 'pending_approval', 'quote_sent'])
 
     const { data: blocked } = await supabase
       .from('blocked_dates').select('*').eq('business_id', biz.id)
@@ -3851,7 +3851,7 @@ const server = app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════╗
   ║   Wexly SMS Bot v2.0                 ║
-  ║   BUILD: v213 (Zelle, Venmo, Cash App deposits)║
+  ║   BUILD: v214 (held slots everywhere, blocked-day window)║
   ║   Running on port ${PORT}               ║
   ║                                      ║
   ║   SMS:    POST /webhook/sms          ║
