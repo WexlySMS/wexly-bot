@@ -310,3 +310,7 @@ Infrastructure
 ## 80. Setup counter never grows; deposits match by category (v209)
 - The "(n of N)" setup label counts the deposit-method question from the first question (it is needed until deposits are decided), and a NO to deposits marks deposit_method skipped so the total stays put. Before: "(2 of 5)" became "(3 of 6)" after a YES, which read like a bug at the moment the owner is deciding to trust the flow.
 - Deposit answers like "$25 for facials, $50 for injectables" match on service name, then category, then the singular keyword against both (matchServices). Owners talk in categories; only exact names matched before.
+
+## 81. Solo keeps the basics (v210)
+- Booking approval, quote mode, deposits (Stripe or payment link), and checkout/invoicing are available on every plan, Solo included. The plan line is staff count (Solo 1, Standard 10, Pro unlimited) plus Standard's growth automations and Pro's marketing tools, never whether a booking can be confirmed or paid for.
+- Removed: the Solo gates in trialOnboarding (booking mode question), ownerCommands update_services (request/quote), and the dashboard (deposit field, booking-mode tiles, Stripe card, Checkout page). Do not reintroduce a plan check on a basic booking or payment path.

@@ -668,9 +668,7 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
     const yes = YES_RE.test(t), no = NO_RE.test(t)
     if (!yes && !no) return null
     const mode = yes ? 'instant' : 'request'
-    if (mode === 'request' && String(biz.plan || '').toLowerCase() === 'solo') {
-      await say(`Approval mode is part of the Standard plan, so on Solo every service books instantly for now. You can upgrade any time in your dashboard under Billing.`)
-    } else {
+    {
       const { error } = await supabase.from('services').update({ booking_mode: mode }).eq('business_id', biz.id)
       if (error) { console.error('[Setup] booking_mode update failed:', error.message); return null }
       await say(yes ? `Done. Everything is instant book: a client texts, picks a time, and it goes straight on your calendar. If any should need your OK first, just tell me which.`

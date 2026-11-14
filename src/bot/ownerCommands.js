@@ -1173,10 +1173,6 @@ async function executeOwnerTool(toolName, input, business) {
       const targets = isAll ? (all || []) : (all || []).filter(sv => wanted.some(w => sv.name.toLowerCase() === w || sv.name.toLowerCase().includes(w) || w.includes(sv.name.toLowerCase())))
       if (!targets.length) return `I couldn't find ${wanted.join(', ')} in your services. Your services are: ${(all || []).map(sv => sv.name).join(', ')}.`
       const patch = {}
-      // Same gate as the dashboard: approval and quote modes are Standard and up.
-      if (['request', 'quote'].includes(input.booking_mode) && String(business.plan || '').toLowerCase() === 'solo') {
-        return `Approval and quote modes are part of the Standard plan. On Solo every service books instantly. You can upgrade any time in your dashboard under Billing.`
-      }
       if (['instant', 'request', 'quote'].includes(input.booking_mode)) patch.booking_mode = input.booking_mode
       if (input.price !== undefined && input.price !== null && !isNaN(Number(input.price))) patch.price = Math.max(0, Number(input.price))
       if (input.duration_mins) patch.duration_mins = Math.min(Math.max(parseInt(input.duration_mins) || 60, 5), 24 * 60)
