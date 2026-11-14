@@ -2736,13 +2736,15 @@ app.get('/public/profile-v2/:slug', async (req, res) => {
     const { slug } = req.params
     // v202 columns (profile_cover_url, profile_about, profile_policies,
     // profile_accent) may not exist yet if the migration hasn't run; fall back.
-    const base = 'id, business_name, business_type, business_type_custom, logo_url, sms_number, hours, timezone, address, profile_description, profile_photos, profile_social, profile_theme, profile_enabled, stripe_account_connected, payment_link'
+    const base = 'id, business_name, business_type, business_type_custom, logo_url, sms_number, hours, timezone, address, profile_description, profile_photos, profile_social, profile_theme, profile_enabled, stripe_account_connected, payment_link, status'
     let q = await supabase.from('businesses').select(base + ', profile_cover_url, profile_about, profile_policies, profile_accent, profile_reviews, reviews_show_enabled').eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
     if (q.error && /reviews_show_enabled/i.test(q.error.message)) q = await supabase.from('businesses').select(base + ', profile_cover_url, profile_about, profile_policies, profile_accent, profile_reviews').eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
     if (q.error && /column|42703/i.test(q.error.message + q.error.code)) q = await supabase.from('businesses').select(base).eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
     const biz = q.data
 
     if (!biz) return res.status(404).json({ error: 'Business not found' })
+    // v215: a cancelled, expired or unpaid account's page goes dark instead of taking bookings nobody will see.
+    if (['cancelled', 'trial_expired', 'past_due', 'pending_checkout'].includes(biz.status)) return res.status(404).json({ error: 'This booking page is not active right now.' })
     res.set('Cache-Control', 'public, max-age=60')
 
     const [services, bundles] = await Promise.all([
@@ -2928,6 +2930,7 @@ app.post('/public/book/:slug', async (req, res) => {
       .maybeSingle()
 
     if (!biz) return res.status(404).json({ error: 'Business not found' })
+    if (['cancelled', 'trial_expired', 'past_due', 'pending_checkout'].includes(biz.status)) return res.status(404).json({ error: 'This booking page is not active right now. Please call the business directly.' })
 
     // Get service
     const { data: services } = await supabase
