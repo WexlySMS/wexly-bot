@@ -861,11 +861,13 @@ app.get('/admin/business/:id', async (req, res) => {
     if (error) throw error
     if (!biz) return res.status(404).json({ error: 'Not found' })
 
-    const [services, faqs, sessions, appts] = await Promise.all([
+    const [services, faqs, sessions, appts, ownerRow] = await Promise.all([
       sb.from('services').select('id, name, price, duration_mins').eq('business_id', id).order('name'),
       sb.from('faqs').select('id, question, answer, sort_order').eq('business_id', id).order('sort_order'),
       sb.from('conversation_sessions').select('customer_phone, messages, last_activity, manual_mode').eq('business_id', id).not('customer_phone', 'like', 'owner:%').order('last_activity', { ascending: false }).limit(40),
       sb.from('appointments').select('id, customer_name, customer_phone, service_name, appointment_date, appointment_time, status, staff_name, created_at').eq('business_id', id).order('appointment_date', { ascending: false }).limit(25),
+      // v215: the owner's thread lives under "owner:<id>" since v208; the old lookup by owner phone always came back empty.
+      sb.from('conversation_sessions').select('customer_phone, messages, last_activity').eq('business_id', id).eq('customer_phone', `owner:${id}`).maybeSingle(),
     ])
 
     const ownerPhone = biz.owner_phone || ''
@@ -882,11 +884,12 @@ app.get('/admin/business/:id', async (req, res) => {
       }
     }
     const allSessions = sessions.data || []
-    const ownerSession = allSessions.find(s => s.customer_phone === ownerPhone)
+    const ownerSession = ownerRow?.data || allSessions.find(s => s.customer_phone === ownerPhone)
     const customerSessions = allSessions.filter(s => s.customer_phone !== ownerPhone).map(summarize)
-    // Owner thread: full last 20 messages so you can see what commands they tried.
+    // Owner thread: last 40 turns, with tool calls flattened to readable text so you can see what commands they tried.
+    const flatten = (c) => typeof c === 'string' ? c : (Array.isArray(c) ? c.map(b => b.type === 'text' ? b.text : b.type === 'tool_use' ? `[tool ${b.name} ${JSON.stringify(b.input)}]` : b.type === 'tool_result' ? `[result ${typeof b.content === 'string' ? b.content : JSON.stringify(b.content)}]` : '').join(' ') : JSON.stringify(c))
     const ownerThread = ownerSession
-      ? (Array.isArray(ownerSession.messages) ? ownerSession.messages : []).slice(-20).map(m => ({ role: m.role, content: String(m.content || '').slice(0, 400), timestamp: m.timestamp || null }))
+      ? (Array.isArray(ownerSession.messages) ? ownerSession.messages : []).slice(-40).map(m => ({ role: m.role, content: flatten(m.content).slice(0, 600), timestamp: m.timestamp || null }))
       : []
 
     const { stripe_customer_id, stripe_subscription_id, stripe_account_id, stripe_account_connected, ...safeBiz } = biz
