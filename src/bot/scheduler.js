@@ -339,7 +339,7 @@ async function sendDailyDigests() {
         day: '2-digit'
       }).formatToParts(now)
 
-      const localHour = parseInt(localNow.find(p => p.type === 'hour')?.value || '0')
+      const localHour = parseInt(localNow.find(p => p.type === 'hour')?.value || '0') % 24
       const localMonth = localNow.find(p => p.type === 'month')?.value
       const localDay = localNow.find(p => p.type === 'day')?.value
       const localYear = localNow.find(p => p.type === 'year')?.value
@@ -355,7 +355,7 @@ async function sendDailyDigests() {
       if (sentToday) continue
 
       const { data: todayAppts } = await sb.from('appointments')
-        .select('*').eq('business_id', biz.id).eq('appointment_date', today).eq('status', 'confirmed')
+        .select('*').eq('business_id', biz.id).eq('appointment_date', today).in('status', ['pending', 'confirmed', 'deposit_pending', 'pending_approval', 'quote_sent']).order('appointment_time')
       const { data: todayCancelled } = await sb.from('appointments')
         .select('*').eq('business_id', biz.id).eq('appointment_date', today).eq('status', 'cancelled')
       const { data: todayNoShows } = await sb.from('appointments')
@@ -433,7 +433,7 @@ async function sendDailyDigests() {
             const scheduleText = staffAppts.length
               ? `📅 ${staff.name} — ${biz.business_name}\n${dateLabel}\n\n` +
                 staffAppts.map(a =>
-                  `${a.appointment_time?.slice(0,5)} — ${a.customer_name} · ${a.service_name}${a.notes ? '\n   📝 ' + a.notes : ''}`
+                  `${formatTime(a.appointment_time)}: ${a.customer_name} · ${a.service_name}${a.status === 'deposit_pending' ? ' (deposit pending)' : a.status === 'pending_approval' ? ' (awaiting approval)' : ''}${a.notes ? '\n   📝 ' + a.notes : ''}`
                 ).join('\n\n') +
                 `\n\n${staffAppts.length} appointment${staffAppts.length !== 1 ? 's' : ''} today.`
               : `📅 ${staff.name} — ${biz.business_name}\n${dateLabel}\n\nNo appointments assigned to you today.`
@@ -790,9 +790,12 @@ async function checkDepositReminders() {
     if (!biz?.sms_number) continue
 
     const expiresAt = new Date(appt.deposit_expires_at)
-    const createdAt = new Date(appt.created_at)
+    // v215: measure from when the deposit was asked for (expiry minus the 4h
+    // window), not from created_at. A deposit created on approval days after
+    // the request used to miss both reminder windows entirely.
+    const depositAskedAt = new Date(expiresAt.getTime() - 4 * 60 * 60 * 1000)
     const msRemaining = expiresAt - now
-    const msSinceCreated = now - createdAt
+    const msSinceCreated = now - depositAskedAt
 
     const customerPhone = appt.customer_phone
     const firstName = appt.customer_name?.split(' ')[0] || 'there'
@@ -800,12 +803,8 @@ async function checkDepositReminders() {
     const service = appt.service_name || 'appointment'
 
     // Format appointment date/time nicely for owner messages
-    const apptDate = appt.appointment_date || ''
-    const apptTime = appt.appointment_time ? (() => {
-      const [h, m] = appt.appointment_time.split(':')
-      const hr = parseInt(h)
-      return `${hr > 12 ? hr - 12 : hr || 12}:${m}${hr >= 12 ? 'pm' : 'am'}`
-    })() : ''
+    const apptDate = appt.appointment_date ? formatDate(appt.appointment_date) : ''
+    const apptTime = appt.appointment_time ? formatTime(appt.appointment_time) : ''
 
     // ── Already expired → cancel ──────────────────────────────────────────
     if (msRemaining <= 0) {
@@ -829,20 +828,26 @@ async function checkDepositReminders() {
     const twoHourWindow = msSinceCreated >= 1.75 * 60 * 60 * 1000 && msSinceCreated <= 2.25 * 60 * 60 * 1000
     if (twoHourWindow && !appt.deposit_reminder_sent) {
       try {
-        const depositLink = appt.deposit_link
-        if (depositLink) {
-          // Shorten before SMS — saves segments. Falls back to long URL on failure.
+        // v215: the helper stores the pay target in deposit_pay_url (a Stripe URL,
+        // a payment link, or a Zelle/Venmo/Cash App handle). The old code read a
+        // column that was never written, so this reminder never went out.
+        const payTarget = appt.deposit_pay_url || appt.deposit_link || null
+        let howToPay = ''
+        if (appt.deposit_payment_mode === 'manual') {
+          const pay = require('../utils/payments').payInstruction({ payment_link: payTarget, business_name: biz.business_name })
+          howToPay = pay ? `Pay ${pay.text} and reply PAID.` : ''
+        } else if (payTarget && /^https?:\/\//i.test(payTarget)) {
           const { shortenUrl } = require('../utils/shortener')
-          const payUrl = await shortenUrl(depositLink, {
-            appointmentId: appt.id,
-            businessId: biz.id
-          })
+          const payUrl = await shortenUrl(payTarget, { appointmentId: appt.id, businessId: biz.id }).catch(() => payTarget)
+          howToPay = `Pay here whenever you're ready: ${payUrl}`
+        }
+        if (howToPay) {
           await sendSMS(biz.sms_number, customerPhone,
-            `Hey ${firstName}! Just a quick heads up — we're still holding your ${service} at ${biz.business_name}, but we do need the deposit to officially lock it in. You've got a couple hours left before the slot opens back up.\n\nPay here whenever you're ready: ${payUrl} 🙏`
+            `Hey ${firstName}! Quick heads up: we're still holding your ${service} at ${biz.business_name}, but we need the deposit to lock it in. You've got a couple of hours before the slot opens back up.\n\n${howToPay} 🙏`
           )
-          await sb.from('appointments').update({ deposit_reminder_sent: true }).eq('id', appt.id)
           console.log(`[Deposit] 2hr reminder sent — appt ${appt.id}`)
         }
+        await sb.from('appointments').update({ deposit_reminder_sent: true }).eq('id', appt.id)
       } catch (err) {
         console.error('[Deposit] 2hr reminder error:', err.message)
       }
@@ -853,7 +858,7 @@ async function checkDepositReminders() {
     if (threeHourWindow && !appt.deposit_owner_alerted && biz.owner_phone) {
       try {
         await sendSMS(biz.sms_number, biz.owner_phone,
-          `⚠️ Deposit alert: ${fullName} booked a ${service} on ${apptDate} at ${apptTime} but hasn't paid the deposit yet.\n\nThe slot will auto-cancel in 1 hour unless you step in.\n\nReply:\n"Confirm ${firstName}" — to approve them without a deposit\n"Cancel ${firstName}" — to cancel now`
+          `⚠️ Deposit alert: ${fullName} booked a ${service} on ${apptDate} at ${apptTime} but hasn't paid the deposit yet.\n\nThe slot auto-cancels in about an hour unless you step in.\n\nReply:\n"Confirm ${firstName}" to keep it without the deposit\n"Cancel ${firstName}" to release it now`
         )
         await sb.from('appointments').update({ deposit_owner_alerted: true }).eq('id', appt.id)
         console.log(`[Deposit] 3hr owner alert sent — appt ${appt.id}`)
