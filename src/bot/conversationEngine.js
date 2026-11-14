@@ -93,6 +93,16 @@ function localToUtcTZ(local, tz) {
   } catch (e) { return null }
 }
 
+const DYNAMIC_SPLIT = '\n<!--DYNAMIC-->\n'
+// Split a built prompt into [cached static block, uncached dynamic block] for the API.
+function systemBlocks(prompt) {
+  const i = prompt.indexOf(DYNAMIC_SPLIT)
+  if (i < 0) return [{ type: 'text', text: prompt }]
+  return [
+    { type: 'text', text: prompt.slice(0, i), cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: prompt.slice(i + DYNAMIC_SPLIT.length) }
+  ]
+}
 function buildSystemPrompt(business, profile, today, returningCustomer = null, upcoming = []) {
   // v212: the client's own upcoming bookings are in the prompt, so "what do I
   // have next week" is answered from facts, not from whether the model
@@ -171,9 +181,12 @@ None on the calendar. If they believe they have one, say you don't see it and of
     ? `This is a MOBILE business — the business travels to the customer. When booking, always confirm the customer's address or location. Never direct customers to a business address.`
     : `This is a PHYSICAL LOCATION business. Customers come to: ${business.address || 'our location'}.`
 
+  // v216: everything up to DYNAMIC_SPLIT is the same for every client of this
+  // business and is sent as a cached block (prompt caching); the date, time and
+  // this client's own facts follow it uncached. Keep anything that changes per
+  // call or per minute BELOW the split or the cache never hits.
   return `You are ${botName}, ${persona} for ${business.business_name}.
-Your name is ${botName}. If a customer asks your name, tell them you're ${botName}.
-Today's date is ${today}. The local time right now is ${new Date().toLocaleTimeString('en-US', { timeZone: business.timezone || 'America/New_York', hour: 'numeric', minute: '2-digit' })}. Timezone: ${business.timezone}.
+Your name is ${botName}. If a customer asks your name, tell them you're ${botName}. Timezone: ${business.timezone}. Today's date and the current time are given at the end of these instructions.
 
 ## YOUR LOCATION
 ${locationContext}
@@ -301,6 +314,10 @@ For multiple services (e.g. cut + color): the same staff member handles both bac
 
 ## OPENING GREETING (use for brand new conversations only)
 "${greeting}"
+
+${DYNAMIC_SPLIT}
+## RIGHT NOW
+Today's date is ${today}. The local time right now is ${new Date().toLocaleTimeString('en-US', { timeZone: business.timezone || 'America/New_York', hour: 'numeric', minute: '2-digit' })} (${business.timezone}). Resolve "tomorrow", "Friday", "next week" from this date.
 
 ${upcomingBlock}
 ${returningCustomer ? `## RETURNING CUSTOMER — IMPORTANT
@@ -437,6 +454,8 @@ const tools = [
     }
   }
 ]
+// v216: the tool list never changes, so it is the first cache breakpoint.
+const cachedTools = tools.map((t, i) => i === tools.length - 1 ? { ...t, cache_control: { type: 'ephemeral' } } : t)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 🔒 PROTECTED — Shared deposit-creation helper. See PROTECTED_DECISIONS.md
@@ -2008,10 +2027,11 @@ async function handleIncomingMessage({ business, customerPhone, incomingText, me
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 512,
-      system: systemPrompt,
-      tools,
+      system: systemBlocks(systemPrompt),
+      tools: cachedTools,
       messages: messagesForAPI
     })
+    try { require('../utils/usage').recordModel({ businessId: business.id, kind: 'client', model: 'claude-sonnet-4-6', usage: response.usage }) } catch {}
 
     if (response.stop_reason === 'tool_use') {
       messagesForAPI.push({ role: 'assistant', content: response.content })

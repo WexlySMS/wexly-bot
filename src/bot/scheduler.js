@@ -195,6 +195,8 @@ function startScheduler() {
 
   // Daily digest — check every 10 minutes for accuracy
   setInterval(() => sendDailyDigests().catch(console.error), 10 * 60 * 1000)
+  // v216: a client whose model + SMS spend passes the threshold this month pings Brandon once.
+  setInterval(() => checkUsageAlerts().catch(console.error), 60 * 60 * 1000)
 
   // 🔒 v190 Instant-trial drip — services nudge, interview offer, bio nudge,
   // first-booking note, day-7/13 card asks, expiry, dead-number recycling.
@@ -302,7 +304,39 @@ async function sendSetupCallReminders() {
   }
 }
 
-module.exports = { sendReminders, sendFollowUps, sendDailyDigests, checkNoShows, runCustomAutomations, sendRebookingReminders, sendSmartRebookingReminders, sendCancellationRebooking, sendBirthdayMessages, sendNoShowRecovery, checkDepositReminders, sendSetupCallReminders, sendAbandonedBookingReminders, sendQuoteReminders, sendAbandonedCartEmails, sendAbandonedCheckoutEmails, startScheduler }
+
+// ── v216: monthly spend alert ─────────────────────────────────────────────────
+// Sums usage_events for the month; any business over USAGE_ALERT_USD (default 50)
+// texts/emails the Wexly owner once per month (usage_alerts is the dedupe).
+async function checkUsageAlerts() {
+  const threshold = Number(process.env.USAGE_ALERT_USD || 50) * 100
+  const { monthToDate } = require('../utils/usage')
+  const r = await monthToDate()
+  if (r.error) return
+  const sb = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+  const month = r.since.slice(0, 10)
+  const over = Object.values(r.byBusiness).filter(b => b.total_cents >= threshold && b.business_id !== 'unattributed')
+  if (!over.length) return
+  const { data: done } = await sb.from('usage_alerts').select('business_id').eq('month', month)
+  const already = new Set((done || []).map(d => d.business_id))
+  const PRICE = { solo: 79, standard: 149, pro: 199 }
+  for (const b of over) {
+    if (already.has(b.business_id)) continue
+    const { error } = await sb.from('usage_alerts').insert({ business_id: b.business_id, month, cost_cents: b.total_cents })
+    if (error) { if (!/usage_alerts|42P01/i.test(error.message)) console.error('[Usage] alert insert failed:', error.message); continue }
+    const price = PRICE[b.plan] || 149
+    const msg = `💸 Usage alert: ${b.business_name || b.business_id} has cost $${(b.total_cents / 100).toFixed(2)} so far this month (model $${(b.model_cents / 100).toFixed(2)}, texts $${(b.sms_cents / 100).toFixed(2)}) on the $${price} ${b.plan || 'standard'} plan. See /admin/usage.`
+    const to = process.env.OWNER_NOTIFICATION_PHONE
+    if (to && process.env.TWILIO_PHONE_NUMBER) await sendSMS(process.env.TWILIO_PHONE_NUMBER, to, msg).catch(e => console.error('[Usage] alert SMS failed:', e.message))
+    try {
+      const { sendEmail } = require('../utils/emailService')
+      if (typeof sendEmail === 'function') await sendEmail({ to: process.env.OWNER_NOTIFICATION_EMAIL || 'hello@getwexly.com', subject: `Wexly usage alert: ${b.business_name || b.business_id}`, html: `<p>${msg}</p>` })
+    } catch {}
+    console.log(`[Usage] alert sent for ${b.business_name || b.business_id}: ${b.total_cents}c`)
+  }
+}
+
+module.exports = { checkUsageAlerts, sendReminders, sendFollowUps, sendDailyDigests, checkNoShows, runCustomAutomations, sendRebookingReminders, sendSmartRebookingReminders, sendCancellationRebooking, sendBirthdayMessages, sendNoShowRecovery, checkDepositReminders, sendSetupCallReminders, sendAbandonedBookingReminders, sendQuoteReminders, sendAbandonedCartEmails, sendAbandonedCheckoutEmails, startScheduler }
 
 // ── Daily digest — sent to Pro plan owners every morning ──────────────────────
 async function sendDailyDigests() {

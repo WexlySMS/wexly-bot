@@ -1935,6 +1935,24 @@ app.post('/admin/clear-conversation', async (req, res) => {
 })
 
 // ── Admin: database health check ────────────────────────────────────────────
+// v216: what each client costs this month (model + texts), from usage_events.
+app.get('/admin/usage', async (req, res) => {
+  if (!isValidAdminSecret(req.headers['x-admin-secret'])) return res.status(403).json({ error: 'Forbidden' })
+  try {
+    const { monthToDate } = require('./src/utils/usage')
+    const r = await monthToDate()
+    if (r.error) return res.status(500).json({ error: r.error, hint: 'Run usage-events.sql in Supabase if the table is missing.' })
+    const PRICE = { solo: 7900, standard: 14900, pro: 19900 }
+    const rows = Object.values(r.byBusiness).map(b => ({
+      ...b,
+      model_usd: +(b.model_cents / 100).toFixed(2), sms_usd: +(b.sms_cents / 100).toFixed(2), total_usd: +(b.total_cents / 100).toFixed(2),
+      plan_price_usd: PRICE[b.plan] ? PRICE[b.plan] / 100 : null,
+      margin_usd: PRICE[b.plan] ? +((PRICE[b.plan] - b.total_cents) / 100).toFixed(2) : null
+    })).sort((a, b) => b.total_cents - a.total_cents)
+    res.json({ since: r.since, alert_threshold_usd: Number(process.env.USAGE_ALERT_USD || 50), businesses: rows, total_usd: +(rows.reduce((t, b) => t + b.total_cents, 0) / 100).toFixed(2) })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
 app.get('/admin/db-health', async (req, res) => {
   if (!isValidAdminSecret(req.headers['x-admin-secret'])) return res.status(403).json({ error: 'Forbidden' })
   const tables = ['businesses', 'services', 'appointments', 'customers', 'email_campaigns']
@@ -3879,7 +3897,7 @@ const server = app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════╗
   ║   Wexly SMS Bot v2.0                 ║
-  ║   BUILD: v215 (owner commands audit, one approval path)║
+  ║   BUILD: v216 (prompt caching, usage ledger, spend alert)║
   ║   Running on port ${PORT}               ║
   ║                                      ║
   ║   SMS:    POST /webhook/sms          ║

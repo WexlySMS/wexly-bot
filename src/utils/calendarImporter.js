@@ -365,6 +365,7 @@ service matching: pick a service_id only when the event clearly means that servi
         tools: [NORMALIZE_TOOL], tool_choice: { type: 'tool', name: 'save_appointments' },
         messages: [{ role: 'user', content }]
       })
+    try { require('./usage').recordModel({ businessId: biz.id, kind: 'import', model: MODEL, usage: resp.usage }) } catch {}
       const call = resp.content.find(c => c.type === 'tool_use')
       for (const it of (call?.input?.items || [])) if (Number.isInteger(it.i)) out.set(it.i, it)
     } catch (e) {
@@ -701,6 +702,7 @@ Names: the client's name as printed. Service text as printed. Never invent a nam
         { type: 'text', text: `BUSINESS: ${biz.business_name} (owner: ${biz.owner_name || 'unknown'}). Timezone ${tz}. Right now it is ${nowLocal}.\nSTAFF: ${staffNames.join(', ') || '(just the owner)'}\nSERVICES (id | name | duration):\n${svcList}\n${ownerText ? `\nOwner's note with the screenshots: "${String(ownerText).slice(0, 300)}"\n` : ''}\nList every appointment and blocked time you can see, today or later.` }
       ] }]
     })
+    try { require('./usage').recordModel({ businessId: biz.id, kind: 'import', model: MODEL, usage: resp.usage }) } catch {}
     const call = resp.content.find(c => c.type === 'tool_use')
     items = call?.input?.items || []; notes = call?.input?.notes || ''
   } catch (e) {

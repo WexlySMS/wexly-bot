@@ -359,6 +359,7 @@ async function extract(url, parts) {
     tools: [TOOL], tool_choice: { type: 'tool', name: 'save_import' },
     messages: [{ role: 'user', content }]
   })
+  try { require('./usage').recordModel({ kind: 'import', model: MODEL, usage: resp.usage }) } catch {}
   const call = resp.content.find(c => c.type === 'tool_use')
   return call ? call.input : {}
 }
@@ -523,6 +524,7 @@ async function importFromImages(mediaUrls, { hint = '' } = {}) {
         { type: 'text', text: `Record everything bookable on these ${images.length} photo(s).${hint ? ` The owner said: "${String(hint).slice(0, 200)}"` : ''}` }
       ] }]
     })
+    try { require('./usage').recordModel({ kind: 'import', model: MODEL, usage: resp.usage }) } catch {}
     const call = resp.content.find(c => c.type === 'tool_use')
     const data = clean(call ? call.input : {}, 'https://getwexly.com/')
     delete data.logo; delete data.cover; data.photos = []   // photo URLs don't apply to an image import

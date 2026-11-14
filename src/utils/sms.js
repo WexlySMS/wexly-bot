@@ -85,6 +85,7 @@ async function sendSMS(from, to, body, mediaUrls) {
   const attempt = async (params) => {
     const message = await twilioClient.messages.create(params)
     console.log(`[SMS] Sent ${from} → ${to}${mediaUrls?.length ? ' (+' + mediaUrls.length + ' photos)' : ''}${params.messagingServiceSid ? ' via service' : ''} | SID: ${message.sid}`)
+    try { require('./usage').recordSms({ smsNumber: from, direction: 'out', body, media: mediaUrls?.length || 0 }) } catch {}
     return { success: true, sid: message.sid }
   }
   try {

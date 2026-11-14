@@ -540,6 +540,7 @@ async function parseHours(text, current = null) {
     : `Business hours as the owner typed them: "${text}". Return 7 days, Sunday first. Days not mentioned as open are closed. "9 to 6" means 09:00 to 18:00.`
   const r = await client.messages.create({ model: 'claude-sonnet-4-6', max_tokens: 600, tools: [{ name: 'save_hours', description: 'Save weekly hours', input_schema: { type: 'object', properties: { days: { type: 'array', minItems: 7, maxItems: 7, description: 'Exactly 7 entries, Sunday first', items: { type: 'object', properties: { open: { type: 'boolean' }, from: { type: 'string', description: 'HH:MM 24h' }, to: { type: 'string', description: 'HH:MM 24h' } }, required: ['open'] } } }, required: ['days'] } }], tool_choice: { type: 'tool', name: 'save_hours' },
     messages: [{ role: 'user', content: prompt }] })
+  try { require('../utils/usage').recordModel({ kind: 'setup', model: 'claude-sonnet-4-6', usage: r.usage }) } catch {}
   const tu = r.content.find(c => c.type === 'tool_use'); const days = tu?.input?.days
   if (!Array.isArray(days) || days.length !== 7) return null
   const week = days.map((d, i) => (d.open && d.from && d.to) ? { day: DAY_NAMES[i], open: true, from: d.from, to: d.to } : { day: DAY_NAMES[i], open: false })

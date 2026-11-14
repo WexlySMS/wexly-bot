@@ -453,6 +453,9 @@ const OWNER_TOOLS = [
   }
 ]
 
+// v216: static tool list = first prompt-cache breakpoint on every owner call.
+const OWNER_TOOLS_CACHED = OWNER_TOOLS.map((t, i) => i === OWNER_TOOLS.length - 1 ? { ...t, cache_control: { type: 'ephemeral' } } : t)
+
 // ── Handle owner tool calls ─────────────────────────────────────────────────
 // Convert "YYYY-MM-DDTHH:MM" in an IANA timezone to a UTC Date. Two-pass
 // offset correction handles DST edges without a date library.
@@ -1760,10 +1763,9 @@ async function handleOwnerMessageInner(business, incomingText, mediaUrls = []) {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 500,
-      tools: OWNER_TOOLS,
-      system: `You are a business management assistant for ${business.business_name}. 
-You are talking to the OWNER of this business via SMS. 
-Today is ${todayFull} (${today}). The local time right now is ${new Date().toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' })} (${tz}).
+      tools: OWNER_TOOLS_CACHED,
+      system: [{ type: 'text', cache_control: { type: 'ephemeral' }, text: `You are a business management assistant for ${business.business_name}. 
+You are talking to the OWNER of this business via SMS. Today's date and the current time are given at the end of these instructions (business timezone ${tz}).
 
 You can help them:
 - Check schedule — "What's on today?"
@@ -1802,9 +1804,11 @@ RULES:
 - Confirm all destructive actions before executing.
 - NEVER agree to do something you have no tool for (emailing, calling, posting online, anything not listed). Say plainly that you can't do that yet by text and point them to the dashboard. Only say "I'll remind you" after the set_reminder tool has run.
 - When a request names a client and a day/time, that's a booking: call book_client. Don't ask for the phone number first; the tool looks it up and says if it's missing.
-- Dates: resolve "Thursday", "tomorrow", "the 14th" to YYYY-MM-DD using today's date above. Times to 24h HH:MM. If the owner gives a time with no date, assume the next occurrence (today if still ahead, else tomorrow).`,
+- Dates: resolve "Thursday", "tomorrow", "the 14th" to YYYY-MM-DD using today's date below. Times to 24h HH:MM. If the owner gives a time with no date, assume the next occurrence (today if still ahead, else tomorrow).` },
+      { type: 'text', text: `RIGHT NOW: Today is ${todayFull} (${today}). The local time is ${new Date().toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' })} (${tz}).` }],
       messages: session.messages
     })
+    try { require('../utils/usage').recordModel({ businessId: business.id, kind: 'owner', model: 'claude-sonnet-4-6', usage: response.usage }) } catch {}
 
     // Check if Claude wants to use tools. IMPORTANT: a single response can
     // contain MULTIPLE tool_use blocks — the API requires a matching tool_result
@@ -1847,10 +1851,11 @@ RULES:
         const followUp = await anthropic.messages.create({
           model: 'claude-sonnet-4-6',
           max_tokens: 500,
-          tools: OWNER_TOOLS,
+          tools: OWNER_TOOLS_CACHED,
           system: `You are a business management assistant for ${business.business_name}. Be concise — this is SMS. Summarize the tool result naturally. Today is ${todayFull} (${today}). The local time right now is ${new Date().toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' })} (${tz}).`,
           messages: session.messages
         })
+        try { require('../utils/usage').recordModel({ businessId: business.id, kind: 'owner', model: 'claude-sonnet-4-6', usage: followUp.usage }) } catch {}
         const followText = followUp.content.find(c => c.type === 'text')
         const reply = followText?.text || firstResult
         session.messages.push({ role: 'assistant', content: reply })
