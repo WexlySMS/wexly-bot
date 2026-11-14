@@ -2733,7 +2733,7 @@ app.get('/public/profile-v2/:slug', async (req, res) => {
     const { slug } = req.params
     // v202 columns (profile_cover_url, profile_about, profile_policies,
     // profile_accent) may not exist yet if the migration hasn't run; fall back.
-    const base = 'id, business_name, business_type, business_type_custom, logo_url, sms_number, hours, timezone, address, profile_description, profile_photos, profile_social, profile_theme, profile_enabled, stripe_account_connected'
+    const base = 'id, business_name, business_type, business_type_custom, logo_url, sms_number, hours, timezone, address, profile_description, profile_photos, profile_social, profile_theme, profile_enabled, stripe_account_connected, payment_link'
     let q = await supabase.from('businesses').select(base + ', profile_cover_url, profile_about, profile_policies, profile_accent, profile_reviews, reviews_show_enabled').eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
     if (q.error && /reviews_show_enabled/i.test(q.error.message)) q = await supabase.from('businesses').select(base + ', profile_cover_url, profile_about, profile_policies, profile_accent, profile_reviews').eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
     if (q.error && /column|42703/i.test(q.error.message + q.error.code)) q = await supabase.from('businesses').select(base).eq('profile_slug', slug.toLowerCase()).eq('profile_enabled', true).maybeSingle()
@@ -2802,7 +2802,8 @@ app.get('/public/profile-v2/:slug', async (req, res) => {
       policies: biz.profile_policies || null,
       accent: biz.profile_accent || null,
       reviews: reviewsOut,
-      depositsEnabled: biz.stripe_account_connected || false,
+      // v215: Zelle/Venmo/Cash App deposits count too (Entry 84), not only Stripe.
+      depositsEnabled: !!(biz.stripe_account_connected || require('./src/utils/payments').hasPayMethod(biz)),
       services: (services.data || [])
         .filter(s => s.active !== false) // only filter if active column exists and is false
         .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
@@ -2831,7 +2832,7 @@ app.get('/public/availability/:slug', async (req, res) => {
 
     const { data: biz } = await supabase
       .from('businesses')
-      .select('id, hours, buffer_mins, advance_booking_days, profile_enabled, profile_slug')
+      .select('*')
       .eq('profile_slug', slug.toLowerCase())
       .eq('profile_enabled', true)
       .maybeSingle()
@@ -2915,7 +2916,7 @@ app.post('/public/book/:slug', async (req, res) => {
     // Find business
     const { data: biz } = await supabase
       .from('businesses')
-      .select('id, business_name, email, owner_phone, sms_number, pro_settings, plan, hours, buffer_mins, advance_booking_days, max_daily, profile_enabled, staff_members, stripe_account_connected, stripe_account_id')
+      .select('*')
       .eq('profile_slug', slug.toLowerCase())
       .eq('profile_enabled', true)
       .maybeSingle()
@@ -2926,11 +2927,13 @@ app.post('/public/book/:slug', async (req, res) => {
     const { data: services } = await supabase
       .from('services').select('*').eq('business_id', biz.id)
 
-    const service = (services || []).find(s =>
-      s.name.toLowerCase() === service_name.toLowerCase()
-    ) || (services || [])[0]
+    // v215: exact, active match only. Falling back to the first service booked
+    // the wrong thing whenever a name was stale on the page.
+    const service = (services || []).filter(s => s.active !== false).find(s =>
+      String(s.name).trim().toLowerCase() === String(service_name || '').trim().toLowerCase()
+    )
 
-    if (!service) return res.status(400).json({ error: 'Service not found' })
+    if (!service) return res.status(400).json({ error: 'That service is no longer offered. Refresh the page and pick again.' })
 
     // Verify slot is still available
     const { data: existing } = await supabase
@@ -3004,6 +3007,7 @@ app.post('/public/book/:slug', async (req, res) => {
     }).catch(err => console.error('[Online Booking] Notification failed:', err.message))
 
     // Send confirmation to customer via SMS if we have a number
+    let depositCreated = false
     if (biz.sms_number && normalizedPhone) {
       const { sendSMS } = require('./src/utils/sms')
       const { formatDate, formatTime } = require('./src/utils/dateHelpers')
@@ -3011,8 +3015,11 @@ app.post('/public/book/:slug', async (req, res) => {
       // and that replying here works (move, cancel, ask). It used to read like
       // a no-reply alert.
       const firstName = String(customer_name).trim().split(/\s+/)[0]
+      const willAskDeposit = !!(service.deposit_amount && service.booking_mode !== 'request' && (biz.stripe_account_connected || require('./src/utils/payments').hasPayMethod(biz)))
       const confirmMsg = service.booking_mode === 'request'
         ? `Hi ${firstName}, this is ${biz.business_name}. We got your request for ${service.name} on ${formatDate(date)} at ${formatTime(time)} and will confirm here shortly. Text this number any time with questions. Reply STOP to opt out.`
+        : willAskDeposit
+        ? `Hi ${firstName}, this is ${biz.business_name}. We're holding ${service.name} on ${formatDate(date)} at ${formatTime(time)}${staffName ? ` with ${staffName}` : ''} for you. Deposit details are in the next text; it's confirmed once that's paid. Text here any time to move it, cancel, or ask a question. Reply STOP to opt out.`
         : `Hi ${firstName}, this is ${biz.business_name}. You're booked for ${service.name} on ${formatDate(date)} at ${formatTime(time)}${staffName ? ` with ${staffName}` : ''}. Save this number: text here any time to move it, cancel, or ask a question. Reply STOP to opt out.`
 
       sendSMS(biz.sms_number, normalizedPhone, confirmMsg)
@@ -3026,51 +3033,23 @@ app.post('/public/book/:slug', async (req, res) => {
           .catch(err => console.error('[Online Booking] email confirmation failed:', err.message))
       }
 
-      // Send deposit link if service requires one and Stripe is connected
-      if (service.deposit_amount && biz.stripe_account_connected && biz.stripe_account_id && appt?.id) {
+      // v215: deposits go through the shared helper (Entry 13): Stripe link or a
+      // Zelle/Venmo/Cash App instruction, status deposit_pending, 4-hour expiry,
+      // reminders and auto-release all behave like a booking made by text. The
+      // old inline Stripe code never set deposit_pending or an expiry, so the
+      // "held for 4 hours" promise was never kept, and link/handle deposits
+      // were skipped entirely. Request-mode services collect it on approval.
+      if (service.deposit_amount && service.booking_mode !== 'request' && appt?.id) {
         try {
-          // Parse deposit amount — could be "$25" or "20%" or "25"
-          var depStr = String(service.deposit_amount).trim()
-          var depCents = 0
-          if (depStr.includes('%')) {
-            var pct = parseFloat(depStr) / 100
-            var priceNum = parseFloat(String(service.price || '0').replace(/[^0-9.]/g, ''))
-            depCents = Math.round(priceNum * pct * 100)
-          } else {
-            depCents = Math.round(parseFloat(depStr.replace(/[^0-9.]/g, '')) * 100)
-          }
-
-          if (depCents > 0) {
-            var stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
-            // 🔒 PROTECTED — Platform fee = 1% with 50¢ floor. See PROTECTED_DECISIONS.md Entry 2.
-            var platformFee = Math.max(50, Math.round(depCents * 0.01))
-            var depSession = await stripe.checkout.sessions.create({
-              mode: 'payment',
-              line_items: [{ price_data: { currency: 'usd', product_data: { name: 'Deposit — ' + service.name + ' at ' + biz.business_name }, unit_amount: depCents }, quantity: 1 }],
-              payment_intent_data: { application_fee_amount: platformFee, statement_descriptor_suffix: (biz.business_name || '').slice(0, 22).trim(), metadata: { businessId: biz.id, appointmentId: appt.id } },
-              metadata: { businessId: biz.id, appointmentId: appt.id },
-              success_url: (process.env.SITE_URL || 'https://getwexly.com') + '/deposit-confirmed.html',
-              cancel_url: (process.env.SITE_URL || 'https://getwexly.com') + '/deposit-cancelled.html',
-            }, { stripeAccount: biz.stripe_account_id })
-
-            await supabase.from('appointments').update({ deposit_link: depSession.url, deposit_status: 'pending', deposit_amount: depCents }).eq('id', appt.id)
-
-            // Shorten the Stripe URL before sending via SMS — saves segments
-            // and looks cleaner. Falls back to the long URL if shortening fails.
-            const { shortenUrl } = require('./src/utils/shortener')
-            const payUrl = await shortenUrl(depSession.url, {
-              appointmentId: appt.id,
-              businessId: biz.id
-            })
-
-            // Send deposit link via SMS
+          const { tryCreateDepositForAppointment } = require('./src/bot/conversationEngine')
+          const { data: returningCustomer } = await supabase.from('customers').select('*').eq('business_id', biz.id).eq('phone', normalizedPhone).maybeSingle()
+          const dep = await tryCreateDepositForAppointment({ business: biz, appointment: appt, service, customerPhone: normalizedPhone, customerName: customer_name, returningCustomer })
+          if (dep.depositText) {
+            depositCreated = !!dep.depositCreated
             setTimeout(function() {
-              sendSMS(biz.sms_number, normalizedPhone,
-                'To confirm your ' + service.name + ' appointment, please pay your ' + depStr + ' deposit here: ' + payUrl + '\n\nYour spot will be held for 4 hours. Reply STOP to opt out.'
-              ).catch(err => console.error('[Online Booking] Deposit SMS failed:', err.message))
+              sendSMS(biz.sms_number, normalizedPhone, String(dep.depositText).trim() + '\n\nReply STOP to opt out.')
+                .catch(err => console.error('[Online Booking] Deposit SMS failed:', err.message))
             }, 3000) // Delay 3s so confirmation arrives first
-
-            console.log('[Online Booking] Deposit link sent: ' + depCents + ' cents for appt ' + appt.id)
           }
         } catch (depErr) {
           console.error('[Online Booking] Deposit creation failed:', depErr.message)
@@ -3087,7 +3066,8 @@ app.post('/public/book/:slug', async (req, res) => {
         date,
         time,
         staff: staffName || null,
-        status: service.booking_mode === 'request' ? 'pending_approval' : 'confirmed'
+        status: service.booking_mode === 'request' ? 'pending_approval' : depositCreated ? 'deposit_pending' : 'confirmed',
+        depositPending: depositCreated
       }
     })
   } catch (err) {

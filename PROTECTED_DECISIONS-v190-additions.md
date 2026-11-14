@@ -337,3 +337,8 @@ Infrastructure
 - running_late compares against the time of day in the business's timezone, not the server's (Render is UTC, so at 3pm Pacific it found nothing), and notifies every held status, not only confirmed.
 - block_dates lists the bookings already on the blocked day/window and says they stay put unless the owner cancels or moves them. Blocking never silently touches bookings.
 - Every owner-facing and client-facing date is formatDate/formatTime (Thursday, November 19 at 2:00 PM), never raw YYYY-MM-DD or 24h. Pending approvals shown in get_schedule are upcoming only. send_quote accepts a numeric price.
+
+## 87. The booking page books like the bot does (v215)
+- /public/availability and /public/book load the full business row. They used to pick a few columns and so ran without timezone (today's past slots judged in New York time), staff_members (no multi-provider capacity) and min_notice_mins. Never hand getAvailableSlots a partial business.
+- /public/book matches the service by exact active name or returns an error; it used to fall back to the first service in the list.
+- Online deposits go through tryCreateDepositForAppointment like every other booking: Stripe link or Zelle/Venmo/Cash App instruction, status deposit_pending, 4-hour expiry, reminders, auto-release. The page says "Spot held" and the text says deposit details follow. Request-mode services collect the deposit on approval (Entry 86). depositsEnabled on the public profile is true for Stripe or a payment handle.
