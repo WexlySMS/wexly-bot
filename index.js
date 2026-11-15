@@ -167,7 +167,9 @@ app.post('/tester/chat', async (req, res) => {
 })
 
 // ── Test owner commands — full owner engine without SMS ─────────────────────
-app.post('/tester/owner', async (req, res) => {
+// v216: this is the dashboard's command box (Messages > Manage). It runs the real
+// owner engine, so it needs the same login check as every other dashboard write.
+app.post('/tester/owner', requireBusinessAuth, async (req, res) => {
   const { businessId, message } = req.body
   if (!businessId || !message) return res.status(400).json({ error: 'Missing businessId or message' })
 
