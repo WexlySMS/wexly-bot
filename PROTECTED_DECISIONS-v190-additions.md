@@ -387,3 +387,6 @@ Infrastructure
 - Client-facing texts that said "text us back to rebook" use deskRebookLine() on desk: "<Owner> will text you to rebook, or grab a new time now: <booking page>".
 - Dashboard: the Bot switch on desk is always off, labeled "You reply to clients", and opens #desk-upgrade-sheet; "Turn it on" calls /stripe/upgrade-plan with plan 'solo' (now allowed; rank check prevents downgrades), sets active true, reloads. No card yet → Billing.
 - Pricing page, signup picker (4 tiles, 2x2 on mobile), support.html, trial email and PLAN_PRICE updated. Never call it "lite".
+
+## 96. Website embed (v226)
+`getwexly.com/embed.js` renders the full booking flow (services, date, live open times, details, deposit, confirmation) inside any client website via `<div data-wexly-book="slug"></div>` + one script tag. Uses only the public endpoints; no keys. Styling via data-color / data-font / data-radius / data-dark; inherits host font by default. Always shows "Booking by Wexly". Dashboard > Booking page has the copy-paste snippet and "See it live" (embed-demo.html?s=slug). Do not add auth, cookies or tracking to embed.js; it runs on third-party domains.
