@@ -101,8 +101,8 @@ ${EMAIL_FOOTER}
 
 async function sendTrialConfirmationEmail({ email, firstName, businessName, trialEndsAt, plan = 'standard' }) {
   const endDate = new Date(trialEndsAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
-  const planLabel = plan === 'pro' ? 'Wexly Pro' : 'Wexly Standard'
-  const planPrice = plan === 'pro' ? '$199' : '$149'
+  const PLANS = { desk: ['Wexly Solo Desk', '$39'], solo: ['Wexly Solo', '$79'], standard: ['Wexly Standard', '$149'], pro: ['Wexly Pro', '$199'] }
+  const [planLabel, planPrice] = PLANS[plan] || PLANS.standard
   await sendEmail({
     from: FROM_BILLING, replyTo: 'billing@getwexly.com', to: email,
     subject: `Your Wexly trial has started. Here is what to expect`,

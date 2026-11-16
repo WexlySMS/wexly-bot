@@ -26,7 +26,7 @@ const CODES_PER_10_MIN = 3
 const VERIFIED_WINDOW_MIN = 30
 const TRIAL_DAYS = 14
 const EXPIRED_NUMBER_GRACE_DAYS = 14
-const PLAN_PRICE = { solo: '$79', standard: '$149', pro: '$199' }
+const PLAN_PRICE = { desk: '$39', solo: '$79', standard: '$149', pro: '$199' }
 
 // ── Phone helpers ─────────────────────────────────────────────────────────────
 function normalizeUSPhone(raw) {
@@ -763,7 +763,7 @@ async function handlePendingOwnerReply(biz, text, mediaUrls = []) {
     const have = new Set(existing.map(st => st.name.toLowerCase()))
     const added = names.filter(n => !have.has(n.toLowerCase())).map(n => ({ name: n.replace(/\b\w/g, c => c.toUpperCase()), phone: '', email: '', auto_schedule: false, notify_via: 'email' }))
     await supabase.from('businesses').update({ staff_members: [...existing, ...added] }).eq('id', biz.id)
-    await say(`Added ${added.map(a => a.name).join(', ')}. Clients can ask for them by name. Add their phone in the app under Staff if you want them notified.${String(biz.plan || '').toLowerCase() === 'solo' && added.length > 1 ? ' Solo is built for one provider; upgrade to Standard for staff scheduling.' : ''}`)
+    await say(`Added ${added.map(a => a.name).join(', ')}. Clients can ask for them by name. Add their phone in the app under Staff if you want them notified.${['solo','desk'].includes(String(biz.plan || '').toLowerCase()) && added.length > 1 ? ' Solo is built for one provider; upgrade to Standard for staff scheduling.' : ''}`)
     await setPending(biz, null, { staff_at: new Date().toISOString() })
     await advanceSetup(biz, 'staff'); return '__sent__'
   }

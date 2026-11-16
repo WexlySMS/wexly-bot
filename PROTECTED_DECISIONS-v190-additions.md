@@ -380,3 +380,10 @@ Infrastructure
 - Bot tools `staff_payout` ("what do I owe Jess this week") and `set_staff_cut` ("Jess gets 50%") use the same math (ownerCommands.js handleStaffPayout). Keep the two in step.
 - Old rows without staff_name fall back to the linked appointment's staff_name. No money moves; this is a report for payroll, never a payout.
 - DDL: src/db/staff-payout.sql (Brandon runs it).
+
+## 95. Solo Desk plan (v222)
+- `plan = 'desk'`, $39/mo, env `STRIPE_DESK_PRICE_ID`. Solo's feature set with the assistant locked off for clients. Wherever the code checks `plan === 'solo'` for limits, `desk` must match too.
+- Inbound client text on desk (webhook.js deskClientHandoff): save to the thread with needs_attention, one courtesy reply per client per day (owner's first name + booking page link when the page is on), forward the message to owner_phone with a sample `book ...` command. Owner commands, confirmations, reminders, review asks, booking page, checkout all run as normal.
+- Client-facing texts that said "text us back to rebook" use deskRebookLine() on desk: "<Owner> will text you to rebook, or grab a new time now: <booking page>".
+- Dashboard: the Bot switch on desk is always off, labeled "You reply to clients", and opens #desk-upgrade-sheet; "Turn it on" calls /stripe/upgrade-plan with plan 'solo' (now allowed; rank check prevents downgrades), sets active true, reloads. No card yet → Billing.
+- Pricing page, signup picker (4 tiles, 2x2 on mobile), support.html, trial email and PLAN_PRICE updated. Never call it "lite".

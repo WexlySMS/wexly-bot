@@ -2291,7 +2291,7 @@ app.post('/auth/create-business', async (req, res) => {
       // collect business type. 'other' is the safe fallback persona in the
       // bot's conversationEngine.js. Owner can change later in dashboard.
       business_type: bizType || 'other',
-      plan: ['solo','standard','pro'].includes(plan) ? plan : 'standard',
+      plan: ['desk','solo','standard','pro'].includes(plan) ? plan : 'standard',
       // 🔒 v190: instant trial starts the 14-day clock NOW, because the number
       // is live now (supersedes the old "clock starts at checkout" rule, which
       // existed only because pending_checkout accounts had no number to use).

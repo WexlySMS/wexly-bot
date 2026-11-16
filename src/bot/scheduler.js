@@ -356,7 +356,7 @@ async function sendDailyDigests() {
     const proSettings = biz.pro_settings || {}
     const notifs = proSettings.notifications || {}
     // Daily digest only for Standard and Pro (not Solo)
-    if (biz.plan === 'solo') continue
+    if (biz.plan === 'solo' || biz.plan === 'desk') continue
     if (notifs.daily_digest === false) continue
 
     const digestTime = parseInt(notifs.digest_time || '8') // default 8am
@@ -417,7 +417,7 @@ async function sendDailyDigests() {
       //   'off' / null on auto_schedule=false — skip
       // If notify_via is undefined on existing records (pre-migration), pick the
       // best available channel: email if they have one, otherwise SMS.
-      const staffMembers = biz.plan !== 'solo'
+      const staffMembers = (biz.plan !== 'solo' && biz.plan !== 'desk')
         ? (biz.staff_members || []).filter(s => s.auto_schedule)
         : []
 

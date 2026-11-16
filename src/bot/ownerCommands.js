@@ -720,7 +720,7 @@ async function executeOwnerTool(toolName, input, business) {
         const { sendSMS } = require('../utils/sms')
         const firstName = (appt.customer_name || '').split(' ')[0] || 'there'
         const reason = input.reason ? ` due to ${input.reason}` : ''
-        const msg = `Hi ${firstName}! We need to reschedule your ${appt.service_name || 'appointment'} on ${formatDate(appt.appointment_date)} at ${formatTime(appt.appointment_time)}${reason}. Text us back with a new day and time that works for you and we'll get you rebooked right away!`
+        const msg = `Hi ${firstName}! We need to reschedule your ${appt.service_name || 'appointment'} on ${formatDate(appt.appointment_date)} at ${formatTime(appt.appointment_time)}${reason}. ${deskRebookLine(business) || "Text us back with a new day and time that works for you and we'll get you rebooked right away!"}`
         const r = await sendSMS(business.sms_number, appt.customer_phone, msg)
         if (r?.success) await noteClientThread(business.id, appt.customer_phone, `[Cancelled by the owner, needs rebooking] ${appt.service_name || 'Appointment'} on ${formatDate(appt.appointment_date)} at ${formatTime(appt.appointment_time)}${reason}. Client was asked to pick a new day and time; book whatever they reply with.`)
       }
@@ -859,7 +859,7 @@ async function executeOwnerTool(toolName, input, business) {
         if (!appt.customer_phone || String(appt.customer_phone).replace(/\D/g, '').length < 10) { failed.push(`${appt.customer_name} (no number)`); continue }
 
         // Text the customer
-        const msg = `Hi ${appt.customer_name?.split(' ')[0] || 'there'}! Unfortunately ${business.business_name} needs to reschedule your ${appt.service_name || 'appointment'} on ${formatDate(targetDate)} at ${timeStr} due to ${reason}. We're sorry for the inconvenience! Reply here anytime to pick a new time and we'll get you rebooked right away 😊`
+        const msg = `Hi ${appt.customer_name?.split(' ')[0] || 'there'}! Unfortunately ${business.business_name} needs to reschedule your ${appt.service_name || 'appointment'} on ${formatDate(targetDate)} at ${timeStr} due to ${reason}. We're sorry for the inconvenience! ${deskRebookLine(business) || "Reply here anytime to pick a new time and we'll get you rebooked right away 😊"}`
 
         try {
           const r = await sendSMS(business.sms_number, appt.customer_phone, msg)
@@ -955,7 +955,7 @@ async function executeOwnerTool(toolName, input, business) {
         const { sendSMS } = require('../utils/sms')
         const firstName = match.customer_name?.split(' ')[0] || 'there'
         const service = match.service_name || 'appointment'
-        const defaultMsg = `Hey ${firstName}! We had you down for a ${service} at ${business.business_name} — did something come up? No worries, just text back whenever you're ready to reschedule 😊`
+        const defaultMsg = `Hey ${firstName}! We had you down for a ${service} at ${business.business_name} — did something come up? No worries, ${deskRebookLine(business) ? deskRebookLine(business).replace(/^(\w+) will/, 'just reach out and $1 will') : "just text back whenever you're ready to reschedule 😊"}`
         let msg = business.noshow_recovery_message || defaultMsg
         msg = msg.replace(/{name}/gi, firstName).replace(/{service}/gi, service)
         if (match.customer_phone) {
@@ -1023,7 +1023,7 @@ async function executeOwnerTool(toolName, input, business) {
       const firstName = match.customer_name?.split(' ')[0] || 'there'
       const service = match.service_name || 'appointment'
       await sendSMS(business.sms_number, match.customer_phone,
-        `Hey ${firstName}! We've gone ahead and released your ${service} slot at ${business.business_name}. Whenever you're ready to rebook and sort the deposit, just text us back — we'd love to have you in! 😊`
+        `Hey ${firstName}! We've gone ahead and released your ${service} slot at ${business.business_name}. ${deskRebookLine(business) ? 'Whenever you\'re ready to rebook, ' + deskRebookLine(business).replace(/^\w+ will text you to rebook, or grab/, 'grab') : "Whenever you're ready to rebook and sort the deposit, just text us back — we'd love to have you in! 😊"}`
       ).catch(() => {})
 
       return `✅ Cancelled ${match.customer_name}'s ${service}. They've been notified and can rebook anytime.`
@@ -1376,6 +1376,16 @@ async function executeOwnerTool(toolName, input, business) {
   }
 }
 
+// ── Solo Desk wording (v222) ────────────────────────────────────────────────
+// On the 'desk' plan the number never answers clients, so client texts that end in "text us back"
+// point to the owner and the booking page instead of into a dead end.
+function deskRebookLine(business) {
+  if (String(business.plan || '').toLowerCase() !== 'desk') return null
+  const first = (business.owner_name || '').trim().split(' ')[0] || 'We'
+  const page = business.profile_slug && business.profile_enabled !== false ? `${process.env.SITE_URL || 'https://getwexly.com'}/book/${business.profile_slug}` : null
+  return page ? `${first} will text you to rebook, or grab a new time now: ${page}` : `${first} will text you shortly to find a new time.`
+}
+
 // ── Pay your team (v222) ────────────────────────────────────────────────────
 // Same math as the dashboard's "Pay your team" card: paid checkouts in the period, sales = total
 // minus tip minus refunds, owed = sales × cut + tips in full. Unassigned checkouts are the owner's.
@@ -1583,7 +1593,7 @@ async function handleAddStaff(business, input) {
   }
   let msg = added.length ? `Added ${added.join(', ')}. Clients can now ask to book with them.` : ''
   if (existing.length) msg += ` ${existing.join(', ')} ${existing.length === 1 ? 'was' : 'were'} already on the list.`
-  if (String(business.plan || '').toLowerCase() === 'solo' && current.length > 1) msg += ` One thing: your Solo plan is built for one provider. Staff bookings work, but to keep everything in step upgrade to Standard in the app under Billing when you get a chance.`
+  if (['solo','desk'].includes(String(business.plan || '').toLowerCase()) && current.length > 1) msg += ` One thing: your Solo plan is built for one provider. Staff bookings work, but to keep everything in step upgrade to Standard in the app under Billing when you get a chance.`
   return msg.trim()
 }
 

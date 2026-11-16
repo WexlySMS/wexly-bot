@@ -33,13 +33,14 @@ router.post('/create-checkout', async (req, res) => {
     // Determine price ID and amount based on plan
     const isPro = plan === 'pro'
     const isSolo = plan === 'solo'
-    console.log(`[Checkout] Plan received: "${plan}" | Solo: ${isSolo} | Pro: ${isPro}`)
-    console.log(`[Checkout] SOLO price ID: ${process.env.STRIPE_SOLO_PRICE_ID ? 'SET' : 'MISSING'}`)
+    const isDesk = plan === 'desk'   // v222: Solo Desk, $39, the owner texts the clients
+    console.log(`[Checkout] Plan received: "${plan}" | Desk: ${isDesk} | Solo: ${isSolo} | Pro: ${isPro}`)
     const priceId = plan === 'pro' ? process.env.STRIPE_PRO_PRICE_ID
       : plan === 'solo' ? process.env.STRIPE_SOLO_PRICE_ID
+      : plan === 'desk' ? process.env.STRIPE_DESK_PRICE_ID
       : process.env.STRIPE_PRICE_ID
-    const planAmount = isPro ? '$199/mo' : isSolo ? '$79/mo' : '$149/mo'
-    const planName = isPro ? 'Wexly Pro' : isSolo ? 'Wexly Solo' : 'Wexly Standard'
+    const planAmount = isPro ? '$199/mo' : isSolo ? '$79/mo' : isDesk ? '$39/mo' : '$149/mo'
+    const planName = isPro ? 'Wexly Pro' : isSolo ? 'Wexly Solo' : isDesk ? 'Wexly Solo Desk' : 'Wexly Standard'
 
     if (!priceId) {
       return res.status(500).json({ error: `Price ID not configured for ${plan} plan` })
@@ -646,7 +647,7 @@ router.post('/webhook', async (req, res) => {
 router.post('/upgrade-plan', async (req, res) => {
   try {
     const { userId, plan } = req.body
-    if (!['standard', 'pro'].includes(plan)) {
+    if (!['solo', 'standard', 'pro'].includes(plan)) {   // v222: 'solo' is the Desk → Solo upgrade (turns the bot on)
       return res.status(400).json({ error: 'Invalid plan' })
     }
     const { data: business } = await supabase
@@ -659,11 +660,13 @@ router.post('/upgrade-plan', async (req, res) => {
       return res.status(400).json({ error: 'No active subscription found' })
     }
 
-    const priceId = plan === 'pro'
-      ? process.env.STRIPE_PRO_PRICE_ID
+    const priceId = plan === 'pro' ? process.env.STRIPE_PRO_PRICE_ID
+      : plan === 'solo' ? process.env.STRIPE_SOLO_PRICE_ID
       : process.env.STRIPE_PRICE_ID
 
     if (!priceId) return res.status(500).json({ error: `${plan} price ID not configured` })
+    const rank = { desk: 0, solo: 1, standard: 2, pro: 3 }
+    if ((rank[plan] ?? 9) <= (rank[business.plan] ?? -1)) return res.status(400).json({ error: 'That is not an upgrade from your current plan.' })
 
     const subscription = await stripe.subscriptions.retrieve(business.stripe_subscription_id)
     await stripe.subscriptions.update(business.stripe_subscription_id, {

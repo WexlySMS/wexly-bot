@@ -112,6 +112,50 @@ async function pausedClientReply(biz, customerPhone, toNumber) {
   }
 }
 
+// ── Solo Desk (v222): the owner texts the clients, Wexly does the rest ─────────
+// On the 'desk' plan the number never converses with clients. A client text is saved to the
+// thread so it shows in the Inbox, the client gets one courtesy reply a day, and the owner gets
+// the message forwarded with the one-line command that puts it on the calendar.
+const deskReplies = new Map() // `${bizId}|${phone}` → ts
+function isDeskPlan(biz) { return String(biz?.plan || '').toLowerCase() === 'desk' }
+async function deskClientHandoff(biz, customerPhone, toNumber, text, mediaUrls) {
+  const DAY = 24 * 60 * 60 * 1000
+  const sb = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+  const fmt = (p) => { const d = String(p || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(p) }
+  let name = null
+  try {
+    const { data: cust } = await sb.from('customers').select('name').eq('business_id', biz.id).in('phone', phoneVariants(customerPhone)).maybeSingle()
+    name = cust?.name || null
+  } catch {}
+  // 1. keep the thread (Inbox shows it, flagged for the owner)
+  try {
+    const { data: full } = await sb.from('conversation_sessions').select('messages').eq('business_id', biz.id).in('customer_phone', phoneVariants(customerPhone)).maybeSingle()
+    const msgs = Array.isArray(full?.messages) ? full.messages : []
+    msgs.push({ role: 'user', content: text, media: mediaUrls?.length ? mediaUrls : undefined, timestamp: new Date().toISOString() })
+    await sb.from('conversation_sessions').upsert({ business_id: biz.id, customer_phone: customerPhone, messages: msgs, last_activity: new Date().toISOString(), needs_attention: true, attention_reason: 'Reply from your phone (Solo Desk)' }, { onConflict: 'business_id,customer_phone' })
+  } catch (e) { console.error('[Desk] thread save failed:', e.message) }
+  // 2. one courtesy reply a day so the client is never texting a dead number
+  const k = `${biz.id}|${customerPhone}`
+  if (Date.now() - (deskReplies.get(k) || 0) >= DAY) {
+    deskReplies.set(k, Date.now())
+    const first = (biz.owner_name || '').trim().split(' ')[0]
+    const page = biz.profile_slug && biz.profile_enabled !== false ? `${process.env.SITE_URL || 'https://getwexly.com'}/book/${biz.profile_slug}` : null
+    const who = first ? `${first} at ${biz.business_name}` : biz.business_name
+    const msg = page
+      ? `Thanks for texting ${biz.business_name}! ${first || 'The owner'} will text you back shortly. Want to grab a time now? Book here: ${page}`
+      : `Thanks for texting ${biz.business_name}! ${first || 'The owner'} will text you back shortly.`
+    await sendSMS(toNumber, customerPhone, msg).catch(() => {})
+    console.log(`[Desk] courtesy reply sent to ${customerPhone} for ${who}`)
+  }
+  // 3. forward to the owner with the command that books it
+  if (biz.owner_phone) {
+    const label = name ? `${name} (${fmt(customerPhone)})` : fmt(customerPhone)
+    const hint = name ? `book ${name.split(' ')[0]} thu 2pm` : `book ${fmt(customerPhone)} thu 2pm`
+    const fwd = `📩 ${label}: "${String(text).slice(0, 300)}"${mediaUrls?.length ? ' [photo]' : ''}\nReply to them from your phone. To put it on the calendar, text me something like: ${hint} facial`
+    await sendSMS(toNumber, biz.owner_phone, fwd).catch(() => {})
+  }
+}
+
 function debouncedProcess(business, customerPhone, toNumber, incomingText, mediaUrls) {
   const key = `${business.id}|${customerPhone}`
   const existing = pendingMessages.get(key)
@@ -413,6 +457,13 @@ router.post('/sms', validateTwilio, async (req, res) => {
     if (['past_due', 'pending_checkout'].includes(business.status) && !business.demo_mode && !ownerPhoneMatch(business, customerPhone)) {
       console.log(`[SMS] ${business.business_name} is ${business.status} — client ${customerPhone} pointed to the business directly`)
       await pausedClientReply(business, customerPhone, toNumber)
+      return
+    }
+
+    // v222: Solo Desk never converses with clients; hand the message to the owner instead.
+    if (isDeskPlan(business) && !business.demo_mode && !ownerPhoneMatch(business, customerPhone)) {
+      console.log(`[Desk] ${business.business_name} — client ${customerPhone} handed to the owner`)
+      await deskClientHandoff(business, customerPhone, toNumber, incomingText, mediaUrls)
       return
     }
 
