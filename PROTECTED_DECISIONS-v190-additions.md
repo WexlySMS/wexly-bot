@@ -373,3 +373,10 @@ Infrastructure
 - Boot/greeting: no background-clip:text and no CSS filters on animating text (WebKit flashed letters); emboss with text-shadow. Greeting chips (things waiting / appointments / First up) reserve their space and fill when stats land. app-launch.html shares the dashboard boot backdrop so the native handoff does not change background. login.html shares the material.
 - Dates: never toISOString().split('T')[0] for "today" in the dashboard; use wxLocalToday() (business tz) or wxIsoLocal(date) (device day). UTC rolled the calendar to tomorrow after 4pm Pacific.
 - After any owner command (Today box or Manage Bot thread) wxRefreshAfterCommand() reloads business, appointments, blocked dates, conversations and pending requests and redraws calendar, day strip, Today feed and settings. It also runs on return to foreground and every 90s while visible, because realtime sleeps in the background on iOS.
+
+## 94. Pay your team (v222)
+- Checkout has a Staff dropdown (shown only when `business.staff_members` has names; preselected from the linked appointment). Saved to `transactions.staff_name`. Owner/unassigned = empty.
+- Money page "Pay your team" card: per-staff paid checkouts for a period (Mon-start weeks, business timezone). Sales = total - tip - refunded_amount. Owed = sales x cut + tips in full. Cut lives on the staff member as `staff_members[].commission_pct` (no new table). CSV export.
+- Bot tools `staff_payout` ("what do I owe Jess this week") and `set_staff_cut` ("Jess gets 50%") use the same math (ownerCommands.js handleStaffPayout). Keep the two in step.
+- Old rows without staff_name fall back to the linked appointment's staff_name. No money moves; this is a report for payroll, never a payout.
+- DDL: src/db/staff-payout.sql (Brandon runs it).

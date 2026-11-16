@@ -450,6 +450,29 @@ const OWNER_TOOLS = [
       },
       required: ['from_staff', 'to_staff']
     }
+  },
+  {
+    name: 'staff_payout',
+    description: 'How much the owner owes a staff member (or everyone) for a pay period: their sales, tips, and commission from paid checkouts. Use for "what do I owe Jess", "how did Jess do this week", "payroll", "team pay", "what did Mia make last week". Only paid checkouts count.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        staff_name: { type: 'string', description: 'Staff member name, or omit for everyone' },
+        period: { type: 'string', enum: ['today', 'this_week', 'last_week', 'two_weeks', 'this_month', 'last_month'], description: 'Pay period. Default this_week. Weeks start Monday.' }
+      }
+    }
+  },
+  {
+    name: 'set_staff_cut',
+    description: 'Set a staff member\'s commission: the share of their sales they keep. Use for "Jess gets 50%", "set Mia\'s cut to 45", "Jess is on 60% commission".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        staff_name: { type: 'string', description: 'Staff member name' },
+        percent: { type: 'number', description: 'Commission percent, 0 to 100' }
+      },
+      required: ['staff_name', 'percent']
+    }
   }
 ]
 
@@ -1342,9 +1365,88 @@ async function executeOwnerTool(toolName, input, business) {
     case 'reassign_appointments':
       return await handleReassignAppointments(business, input)
 
+    case 'staff_payout':
+      return await handleStaffPayout(business, input)
+
+    case 'set_staff_cut':
+      return await handleSetStaffCut(business, input)
+
     default:
       return `Unknown command.`
   }
+}
+
+// ── Pay your team (v222) ────────────────────────────────────────────────────
+// Same math as the dashboard's "Pay your team" card: paid checkouts in the period, sales = total
+// minus tip minus refunds, owed = sales × cut + tips in full. Unassigned checkouts are the owner's.
+function payoutRange(period, tz) {
+  const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: tz })
+  const d = new Date(todayIso + 'T12:00:00Z')
+  const iso = x => x.toISOString().slice(0, 10)
+  const add = (x, n) => new Date(x.getTime() + n * 864e5)
+  const monday = add(d, -((d.getUTCDay() + 6) % 7))
+  switch (period) {
+    case 'today': return { start: iso(d), end: iso(d), label: 'today' }
+    case 'last_week': return { start: iso(add(monday, -7)), end: iso(add(monday, -1)), label: 'last week' }
+    case 'two_weeks': return { start: iso(add(monday, -7)), end: iso(d), label: 'the last two weeks' }
+    case 'this_month': return { start: todayIso.slice(0, 8) + '01', end: iso(d), label: 'this month' }
+    case 'last_month': { const first = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1)); const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 0)); return { start: iso(first), end: iso(last), label: 'last month' } }
+    default: return { start: iso(monday), end: iso(d), label: 'this week' }
+  }
+}
+function tzBoundary(isoDay, endOfDay, tz) {
+  const guess = new Date(isoDay + (endOfDay ? 'T23:59:59.999Z' : 'T00:00:00.000Z'))
+  const asTz = new Date(guess.toLocaleString('en-US', { timeZone: tz }))
+  const asUtc = new Date(guess.toLocaleString('en-US', { timeZone: 'UTC' }))
+  return new Date(guess.getTime() + (asUtc.getTime() - asTz.getTime())).toISOString()
+}
+const money = c => '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).replace(/\.00$/, '')
+function findStaff(business, name) {
+  const list = (business.staff_members || []).filter(s => s && s.name)
+  if (!name) return null
+  const n = String(name).toLowerCase().trim()
+  return list.find(s => s.name.toLowerCase() === n) || list.find(s => s.name.toLowerCase().split(' ')[0] === n.split(' ')[0]) || list.find(s => s.name.toLowerCase().includes(n)) || null
+}
+async function handleStaffPayout(business, input) {
+  const staff = (business.staff_members || []).filter(s => s && s.name)
+  if (!staff.length) return `You don't have any staff added yet. Text me something like "add Jess, she does haircuts" and I'll set her up.`
+  const tz = business.timezone || 'America/New_York'
+  const { start, end, label } = payoutRange(input.period || 'this_week', tz)
+  const one = input.staff_name ? findStaff(business, input.staff_name) : null
+  if (input.staff_name && !one) return `I don't see ${input.staff_name} on your team. Your staff: ${staff.map(s => s.name).join(', ')}.`
+  const base = 'subtotal, tip, total, status, refunded_amount, created_at, appointments(staff_name)'
+  let q = await supabase.from('transactions').select('staff_name, ' + base).eq('business_id', business.id).eq('status', 'paid').gte('created_at', tzBoundary(start, false, tz)).lte('created_at', tzBoundary(end, true, tz)).limit(5000)
+  if (q.error) q = await supabase.from('transactions').select(base).eq('business_id', business.id).eq('status', 'paid').gte('created_at', tzBoundary(start, false, tz)).lte('created_at', tzBoundary(end, true, tz)).limit(5000)
+  const rows = {}
+  staff.forEach(s => { rows[s.name] = { name: s.name, sales: 0, tips: 0, count: 0, pct: s.commission_pct != null && s.commission_pct !== '' && !isNaN(Number(s.commission_pct)) ? Number(s.commission_pct) : null } })
+  for (const t of q.data || []) {
+    const who = t.staff_name || t.appointments?.staff_name
+    const st = who && staff.find(s => s.name.toLowerCase() === String(who).toLowerCase())
+    if (!st) continue
+    const r = rows[st.name]
+    r.sales += Math.max(0, (t.total || 0) - (t.tip || 0) - (t.refunded_amount || 0)); r.tips += (t.tip || 0); r.count++
+  }
+  const line = r => {
+    if (!r.count) return `${r.name}: no paid checkouts ${label}.`
+    const owed = r.pct == null ? null : Math.round(r.sales * r.pct / 100) + r.tips
+    const core = `${r.name}: ${money(r.sales)} in sales and ${money(r.tips)} in tips across ${r.count} checkout${r.count === 1 ? '' : 's'} ${label}.`
+    return owed == null ? `${core} Tell me their cut (like "${r.name.split(' ')[0]} gets 50%") and I'll work out what you owe.` : `${core} At ${r.pct}% you owe ${money(owed)} (${money(Math.round(r.sales * r.pct / 100))} commission + ${money(r.tips)} tips).`
+  }
+  if (one) return line(rows[one.name])
+  const out = Object.values(rows).map(line)
+  const total = Object.values(rows).reduce((a, r) => a + (r.pct == null ? 0 : Math.round(r.sales * r.pct / 100) + r.tips), 0)
+  return out.join('\n') + (total ? `\nTotal owed: ${money(total)}.` : '')
+}
+async function handleSetStaffCut(business, input) {
+  const st = findStaff(business, input.staff_name)
+  if (!st) return `I don't see ${input.staff_name} on your team. Your staff: ${(business.staff_members || []).filter(s => s && s.name).map(s => s.name).join(', ') || 'nobody yet'}.`
+  const pct = Number(input.percent)
+  if (isNaN(pct) || pct < 0 || pct > 100) return `What percent should ${st.name} keep? Something between 0 and 100.`
+  const list = (business.staff_members || []).map(s => s && s.name === st.name ? { ...s, commission_pct: pct } : s)
+  const { error } = await supabase.from('businesses').update({ staff_members: list }).eq('id', business.id)
+  if (error) return `I couldn't save that. Try again in a moment.`
+  business.staff_members = list
+  return `Got it. ${st.name} keeps ${pct}% of their sales plus all their tips. Ask me "what do I owe ${st.name.split(' ')[0]} this week" any time.`
 }
 
 // ── v208: owner-side booking, hours, staff, messaging, handoff ───────────────
