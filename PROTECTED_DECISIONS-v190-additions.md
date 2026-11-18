@@ -393,3 +393,6 @@ Infrastructure
 
 ## 97. App icon badge (v227)
 Pushes used to send a hard-coded `badge: 1` and nothing cleared it. Now every push carries the real "needs you" count (`badgeCount`: paused threads + bookings pending approval/quote/deposit from today on), and `syncBadge` sends a silent background push with that count. The app calls POST /push/badge-sync on open, resume, after conversations load, and after resolving a thread; the server also resyncs after approve/deny. Do not reintroduce a constant badge value or clear the badge from the web layer (iOS ignores it); the count must come from data.
+
+## 98. TEST mode (v227)
+The owner's verified cell is the boss number, so a signup could never experience the client side from their own phone. Owner texts TEST (or "try it") → for 10 minutes their texts route to the client receptionist (src/bot/testMode.js, checked in webhook.js before owner routing); the booking alert lands on the same phone; DONE or expiry deletes the test bookings, customer record and client thread (scoped to owner phone + test window). State in businesses.onboarding.test_started_at/test_until; scheduler expires every 2 min. Welcome text and the dashboard welcome modal both push TEST as the first action. Do not remove the cleanup or let test bookings persist.

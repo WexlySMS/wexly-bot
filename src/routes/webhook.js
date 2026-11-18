@@ -504,8 +504,20 @@ router.post('/sms', validateTwilio, async (req, res) => {
       ('1' + stored) === incoming
     )
 
-    const isOwner = matchesPhone(ownerPhone, senderPhone) ||
+    let isOwner = matchesPhone(ownerPhone, senderPhone) ||
       additionalPhones.some(p => matchesPhone(p, senderPhone))
+
+    // v227 TEST mode: the owner can reply TEST and be treated as a client for ten
+    // minutes, so a new signup experiences a booking from their own phone. While
+    // it's on, their texts fall through to the client receptionist below.
+    if (isOwner) {
+      try {
+        const { handleTestMode } = require('../bot/testMode')
+        const tm = await handleTestMode(business, incomingText, toNumber, customerPhone)
+        if (tm === 'handled') return
+        if (tm === 'client') { isOwner = false; console.log(`[TestMode] ${business.business_name}: owner text routed as client`) }
+      } catch (e) { console.error('[TestMode] check failed:', e.message) }
+    }
 
     if (!isOwner) {
       const checkInPhrases = ['here', "i'm here", 'im here', 'i am here', 'arrived', 'outside', "i'm outside", 'im outside', 'just arrived', 'just got here', 'parking lot', 'in the parking', 'checked in', 'checking in']

@@ -246,7 +246,7 @@ async function sendTrialWelcome(biz) {
   // v200: trimmed to fit one GSM segment (160 chars) for typical names.
   const hello =
     `Hi ${name}, I'm your Wexly assistant for ${biz.business_name}. ` +
-    `Please save this number. Reply SETUP for a free setup, or text me your services and I'll add them.`
+    `Save this number, it's the one your clients will text.\n\nWant to see what they get? Reply TEST and text me like you're a client booking in. Or reply SETUP and I'll set everything up for you.`
 
   const sent = await sendSMS(biz.sms_number, biz.owner_phone, hello)
   if (!sent.success) return

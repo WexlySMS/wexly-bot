@@ -204,6 +204,9 @@ function startScheduler() {
   const { runTrialOnboardingDrip } = require('./trialOnboarding')
   setTimeout(() => runTrialOnboardingDrip().catch(console.error), 45 * 1000)
   setInterval(() => runTrialOnboardingDrip().catch(console.error), 10 * 60 * 1000)
+  // v227 TEST mode expiry (owner-as-client window): clean up tests that ended without DONE.
+  const { expireTestModes } = require('./testMode')
+  setInterval(() => expireTestModes().catch(console.error), 2 * 60 * 1000)
 
   // 🔒 v191 Owner reminders ("remind me tomorrow at 9...") — every 2 min
   setInterval(() => sendOwnerReminders().catch(console.error), 60 * 1000)
