@@ -260,11 +260,13 @@ async function syncBadge(businessId) {
   if (!rows?.length) return { count, sent: 0 }
   let sent = 0
   const ios = apnsConfigured() ? rows.filter(r => r.platform === 'ios') : []
-  const payload = { aps: { badge: count, 'content-available': 1 } }
+  // Badge-only alert push: no alert/sound keys means nothing is shown, but unlike a
+  // background push iOS applies it immediately instead of throttling it.
+  const payload = { aps: { badge: count } }
   const dead = []
   for (const r of ios) {
-    let x = await apnsSendOne(r.token, payload, 'api.push.apple.com', { background: true })
-    if (!x.ok && x.reason === 'BadDeviceToken') x = await apnsSendOne(r.token, payload, 'api.sandbox.push.apple.com', { background: true })
+    let x = await apnsSendOne(r.token, payload, 'api.push.apple.com')
+    if (!x.ok && x.reason === 'BadDeviceToken') x = await apnsSendOne(r.token, payload, 'api.sandbox.push.apple.com')
     if (x.ok) sent++
     else if (x.status === 410 || x.reason === 'Unregistered' || x.reason === 'BadDeviceToken' || x.reason === 'DeviceTokenNotForTopic') dead.push(r.token)
   }
@@ -273,7 +275,7 @@ async function syncBadge(businessId) {
   if (m && rest.length) {
     try {
       const res = await m.sendEachForMulticast({ tokens: rest.map(r => r.token), data: { badge: String(count) },
-        apns: { headers: { 'apns-push-type': 'background', 'apns-priority': '5' }, payload: { aps: { badge: count, 'content-available': 1 } } },
+        apns: { headers: { 'apns-push-type': 'alert', 'apns-priority': '10' }, payload: { aps: { badge: count } } },
         android: { priority: 'normal' } })
       sent += res.successCount
     } catch (e) { console.error('[Push] badge sync FCM failed:', e.message) }
