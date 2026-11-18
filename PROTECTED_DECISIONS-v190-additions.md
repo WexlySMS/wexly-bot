@@ -390,3 +390,6 @@ Infrastructure
 
 ## 96. Website embed (v226)
 `getwexly.com/embed.js` renders the full booking flow (services, date, live open times, details, deposit, confirmation) inside any client website via `<div data-wexly-book="slug"></div>` + one script tag. Uses only the public endpoints; no keys. Styling via data-color / data-font / data-radius / data-dark; inherits host font by default. Always shows "Booking by Wexly". Dashboard > Booking page has the copy-paste snippet and "See it live" (embed-demo.html?s=slug). Do not add auth, cookies or tracking to embed.js; it runs on third-party domains.
+
+## 97. App icon badge (v227)
+Pushes used to send a hard-coded `badge: 1` and nothing cleared it. Now every push carries the real "needs you" count (`badgeCount`: paused threads + bookings pending approval/quote/deposit from today on), and `syncBadge` sends a silent background push with that count. The app calls POST /push/badge-sync on open, resume, after conversations load, and after resolving a thread; the server also resyncs after approve/deny. Do not reintroduce a constant badge value or clear the badge from the web layer (iOS ignores it); the count must come from data.
