@@ -441,6 +441,19 @@ app.post('/push/register', requireBusinessAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
+// Badge sync: the app calls this on open/resume and after the owner clears something.
+// We answer with the real "needs you" count and push it silently to every device, so the
+// icon number can go back to 0 (iOS only changes a badge via push or native code).
+app.post('/push/badge-sync', requireBusinessAuth, async (req, res) => {
+  const { businessId } = req.body
+  if (!businessId) return res.status(400).json({ error: 'Missing businessId' })
+  try {
+    const { syncBadge } = require('./src/utils/push')
+    const r = await syncBadge(businessId)
+    res.json({ success: true, ...r })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
 app.post('/push/unregister', requireBusinessAuth, async (req, res) => {
   const { businessId, token } = req.body
   if (!businessId || !token) return res.status(400).json({ error: 'Missing fields' })
@@ -2442,6 +2455,7 @@ app.post('/owner-action/approve-request', requireBusinessAuth, async (req, res) 
     const r = await require('./src/bot/approval').approveAppointment(biz, appt)
     if (!r.ok) return res.status(409).json({ error: r.reason === 'not_pending' ? `Already ${r.status}` : 'Not found', ...r })
     res.json({ success: true, ...r })
+    require('./src/utils/push').syncBadge(businessId).catch(() => {})
   } catch (err) {
     console.error('[Approve] Error:', err.message)
     res.status(500).json({ error: err.message })
@@ -2459,6 +2473,7 @@ app.post('/owner-action/deny-request', requireBusinessAuth, async (req, res) => 
     const r = await require('./src/bot/approval').denyAppointment(biz, appt, req.body.reason)
     if (!r.ok) return res.status(409).json({ error: r.reason === 'not_pending' ? `Already ${r.status}` : 'Not found', ...r })
     res.json({ success: true, ...r })
+    require('./src/utils/push').syncBadge(businessId).catch(() => {})
   } catch (err) {
     console.error('[Deny] Error:', err.message)
     res.status(500).json({ error: err.message })

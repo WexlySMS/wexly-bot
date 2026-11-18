@@ -95,7 +95,8 @@ function apnsToken() {
 
 // One push to one device. Resolves { ok, status, reason }. Tries production first; a
 // BadDeviceToken answer means the token came from an Xcode/debug build, so retry on sandbox.
-function apnsSendOne(token, payload, host) {
+function apnsSendOne(token, payload, host, opts) {
+  opts = opts || {}
   return new Promise((resolve) => {
     let client
     try { client = http2.connect('https://' + host) } catch (e) { return resolve({ ok: false, reason: e.message }) }
@@ -104,7 +105,7 @@ function apnsSendOne(token, payload, host) {
     const req = client.request({
       ':method': 'POST', ':path': '/3/device/' + token,
       'authorization': 'bearer ' + apnsToken(), 'apns-topic': APNS_BUNDLE_ID,
-      'apns-push-type': 'alert', 'apns-priority': '10', 'apns-expiration': String(Math.floor(Date.now() / 1000) + 3600),
+      'apns-push-type': opts.background ? 'background' : 'alert', 'apns-priority': opts.background ? '5' : '10', 'apns-expiration': String(Math.floor(Date.now() / 1000) + 3600),
       'content-type': 'application/json',
     })
     let status = 0, body = ''
@@ -117,8 +118,23 @@ function apnsSendOne(token, payload, host) {
   })
 }
 
-async function apnsSend(tokens, { title, body, data }) {
-  const payload = { aps: { alert: { title, body }, sound: 'default', badge: 1 }, ...(data || {}) }
+// What the app icon badge should show: the same "needs you" count the dashboard shows.
+// Threads the assistant paused for the owner + bookings waiting on approval, a quote, or a deposit
+// (today or later). Never throws; a lookup failure falls back to 1 so an alert still badges.
+async function badgeCount(businessId) {
+  try {
+    const today = new Date(Date.now() - 12 * 3600e3).toISOString().slice(0, 10)   // generous: any tz
+    const [c, a] = await Promise.all([
+      supabase.from('conversation_sessions').select('id', { count: 'exact', head: true }).eq('business_id', businessId).eq('needs_attention', true),
+      supabase.from('appointments').select('id', { count: 'exact', head: true }).eq('business_id', businessId).in('status', ['pending_approval', 'quote_sent', 'deposit_pending']).gte('appointment_date', today),
+    ])
+    if (c.error || a.error) throw new Error((c.error || a.error).message)
+    return (c.count || 0) + (a.count || 0)
+  } catch (e) { console.error('[Push] badgeCount failed:', e.message); return 1 }
+}
+
+async function apnsSend(tokens, { title, body, data, badge }) {
+  const payload = { aps: { alert: { title, body }, sound: 'default', badge: Number.isFinite(badge) ? badge : 1 }, ...(data || {}) }
   const dead = [], reasons = []; let sent = 0, failed = 0
   for (const t of tokens) {
     let r = await apnsSendOne(t, payload, 'api.push.apple.com')
@@ -151,12 +167,13 @@ async function pushToBusiness(businessId, { title, body, data }) {
 
     const strData = {}
     for (const [k, v] of Object.entries(data || {})) if (v !== undefined && v !== null) strData[k] = String(v)
+    const badge = await badgeCount(businessId)
 
     // iOS → APNs directly when configured; everything else (Android, or iOS when only FCM is set up) → FCM
     let total = { sent: 0, failed: 0, devices: allRows.length, configured: true }
     const iosRows = apns ? allRows.filter(r => r.platform === 'ios') : []
     if (iosRows.length) {
-      const r = await apnsSend(iosRows.map(x => x.token), { title, body, data: strData })
+      const r = await apnsSend(iosRows.map(x => x.token), { title, body, data: strData, badge })
       total.sent += r.sent; total.failed += r.failed; if (r.reasons?.length) total.reasons = r.reasons
       if (r.dead.length) { await supabase.from('push_tokens').delete().in('token', r.dead); console.log(`[Push] pruned ${r.dead.length} dead iOS token(s)`) }
     }
@@ -167,7 +184,7 @@ async function pushToBusiness(businessId, { title, body, data }) {
       tokens: rows.map(r => r.token),
       notification: { title, body },
       data: strData,
-      apns: { payload: { aps: { sound: 'default', badge: 1 } } },
+      apns: { payload: { aps: { sound: 'default', badge } } },
       android: { priority: 'high', notification: { sound: 'default', channelId: 'wexly_default' } },
     })
 
@@ -233,4 +250,35 @@ async function pushCancellation(business, { customerName, serviceName, appointme
   })
 }
 
-module.exports = { isEnabled, pushToBusiness, pushNewBooking, pushEscalation, pushCancellation, apnsDiagnostics }
+// Silent badge update: no banner, no sound, just sets the icon number to the real count.
+// The app asks for this when it opens or when the owner clears something, so a badge never
+// outlives the thing it was counting. Returns the count it pushed.
+async function syncBadge(businessId) {
+  if (!businessId) return { count: 0, sent: 0 }
+  const count = await badgeCount(businessId)
+  const { data: rows } = await supabase.from('push_tokens').select('token, platform').eq('business_id', businessId)
+  if (!rows?.length) return { count, sent: 0 }
+  let sent = 0
+  const ios = apnsConfigured() ? rows.filter(r => r.platform === 'ios') : []
+  const payload = { aps: { badge: count, 'content-available': 1 } }
+  const dead = []
+  for (const r of ios) {
+    let x = await apnsSendOne(r.token, payload, 'api.push.apple.com', { background: true })
+    if (!x.ok && x.reason === 'BadDeviceToken') x = await apnsSendOne(r.token, payload, 'api.sandbox.push.apple.com', { background: true })
+    if (x.ok) sent++
+    else if (x.status === 410 || x.reason === 'Unregistered' || x.reason === 'BadDeviceToken' || x.reason === 'DeviceTokenNotForTopic') dead.push(r.token)
+  }
+  if (dead.length) await supabase.from('push_tokens').delete().in('token', dead)
+  const m = getMessaging(); const rest = rows.filter(r => !ios.includes(r))
+  if (m && rest.length) {
+    try {
+      const res = await m.sendEachForMulticast({ tokens: rest.map(r => r.token), data: { badge: String(count) },
+        apns: { headers: { 'apns-push-type': 'background', 'apns-priority': '5' }, payload: { aps: { badge: count, 'content-available': 1 } } },
+        android: { priority: 'normal' } })
+      sent += res.successCount
+    } catch (e) { console.error('[Push] badge sync FCM failed:', e.message) }
+  }
+  return { count, sent }
+}
+
+module.exports = { isEnabled, badgeCount, syncBadge, pushToBusiness, pushNewBooking, pushEscalation, pushCancellation, apnsDiagnostics }
