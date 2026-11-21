@@ -124,11 +124,12 @@ const OWNER_TOOLS = [
   },
   {
     name: 'unblock_date',
-    description: 'Remove a blocked date so customers can book again.',
+    description: 'Remove blocked days so customers can book again. For more than one day ("the rest of the week", "Friday through Sunday", "everything until the 8th") pass date as the first day and end_date as the last day: one call clears the whole range. The result says exactly which days were cleared; only tell the owner what it says.',
     input_schema: {
       type: 'object',
       properties: {
-        date: { type: 'string', description: 'YYYY-MM-DD date to unblock' }
+        date: { type: 'string', description: 'YYYY-MM-DD first (or only) day to unblock' },
+        end_date: { type: 'string', description: 'YYYY-MM-DD last day to unblock, inclusive. Omit for a single day.' }
       },
       required: ['date']
     }
@@ -900,14 +901,22 @@ async function executeOwnerTool(toolName, input, business) {
     }
 
     case 'unblock_date': {
-      const { error } = await supabase
+      // v228: range support + report what was actually removed. The old version
+      // returned "open again" even when no row matched, so a wrong date read as success.
+      const from = input.date
+      const to = input.end_date && input.end_date >= from ? input.end_date : from
+      const { data: removed, error } = await supabase
         .from('blocked_dates')
         .delete()
         .eq('business_id', business.id)
-        .eq('blocked_date', input.date)
+        .gte('blocked_date', from)
+        .lte('blocked_date', to)
+        .select('blocked_date')
 
-      if (error) return `I couldn't unblock that day. Try again in a moment.`
-      return `✅ ${formatDate(input.date)} is open for bookings again.`
+      if (error) return `I couldn't unblock ${from === to ? formatDate(from) : `${formatDate(from)} to ${formatDate(to)}`}: ${error.message}. Nothing was changed.`
+      const days = [...new Set((removed || []).map(r => r.blocked_date))].sort()
+      if (!days.length) return `Nothing was blocked ${from === to ? `on ${formatDate(from)}` : `between ${formatDate(from)} and ${formatDate(to)}`}, so those days were already open.`
+      return `✅ Unblocked ${days.map(d => formatDate(d)).join(', ')}. ${days.length === 1 ? 'It is' : 'They are'} open for bookings again.`
     }
 
     case 'mark_no_show': {
@@ -1876,7 +1885,7 @@ async function handleOwnerMessageInner(business, incomingText, mediaUrls = []) {
   trimSessionSafely(session)
 
   try {
-    const response = await anthropic.messages.create({
+    const ownerParams = {
       model: 'claude-sonnet-4-6',
       max_tokens: 500,
       tools: OWNER_TOOLS_CACHED,
@@ -1918,21 +1927,40 @@ RULES:
 - Remember context from earlier messages in this conversation. If the owner said "check my schedule" and then says "cancel the 3pm", you know which appointment they mean.
 - If the request is unclear, ask ONE clarifying question.
 - Confirm all destructive actions before executing.
+- Never say you are doing or have done something unless a tool result in this conversation confirms it. If a request needs more than one step (look something up, then act), call the tools for every step before you reply; don't reply with "doing it now".
 - NEVER agree to do something you have no tool for (emailing, calling, posting online, anything not listed). Say plainly that you can't do that yet by text and point them to the dashboard. Only say "I'll remind you" after the set_reminder tool has run.
 - When a request names a client and a day/time, that's a booking: call book_client. Don't ask for the phone number first; the tool looks it up and says if it's missing.
 - Dates: resolve "Thursday", "tomorrow", "the 14th" to YYYY-MM-DD using today's date below. Times to 24h HH:MM. If the owner gives a time with no date, assume the next occurrence (today if still ahead, else tomorrow).` },
       { type: 'text', text: `RIGHT NOW: Today is ${todayFull} (${today}). The local time is ${new Date().toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' })} (${tz}).` }],
       messages: session.messages
-    })
-    try { require('../utils/usage').recordModel({ businessId: business.id, kind: 'owner', model: 'claude-sonnet-4-6', usage: response.usage }) } catch {}
+    }
+    const callOwnerModel = async () => {
+      const r = await anthropic.messages.create({ ...ownerParams, messages: session.messages })
+      try { require('../utils/usage').recordModel({ businessId: business.id, kind: 'owner', model: 'claude-sonnet-4-6', usage: r.usage }) } catch {}
+      return r
+    }
+    let response = await callOwnerModel()
 
     // Check if Claude wants to use tools. IMPORTANT: a single response can
     // contain MULTIPLE tool_use blocks — the API requires a matching tool_result
     // for EVERY one of them, in the very next user message. The old code handled
     // only the first (.find), orphaning the rest and 400-ing every future call.
-    const toolUses = response.content.filter(c => c.type === 'tool_use')
-    if (toolUses.length > 0) {
-      // Execute each tool and build one tool_result per tool_use.
+    // v228: AGENT LOOP. The model may need several rounds: look up, then act
+    // ("unblock the rest of the week" = get_blocked_dates, then unblock_date x3).
+    // The old code ran ONE round of tools and then sent whatever text the second
+    // call wrote, dropping any tool calls in it, so the owner got "Unblocking all
+    // of them now!" and nothing was unblocked. Now every round's tools run until
+    // the model answers in plain text (max 6 rounds).
+    // IMPORTANT: a single response can contain MULTIPLE tool_use blocks; the API
+    // requires a matching tool_result for EVERY one, in the very next user turn.
+    const MAX_ROUNDS = 6
+    let rounds = 0
+    let firstResult = null
+    let lastResults = []
+    while (true) {
+      const toolUses = response.content.filter(c => c.type === 'tool_use')
+      if (!toolUses.length) break
+      rounds++
       const toolResults = []
       for (const tu of toolUses) {
         let result
@@ -1942,6 +1970,7 @@ RULES:
           console.error('[Owner] Tool execution failed:', tu.name, toolErr.message)
           result = `Error running ${tu.name}: ${toolErr.message}`
         }
+        console.log(`[Owner] round ${rounds} ${tu.name} ${JSON.stringify(tu.input).slice(0, 160)}`)
         toolResults.push({
           type: 'tool_result',
           tool_use_id: tu.id,
@@ -1960,37 +1989,31 @@ RULES:
       session.messages.push({ role: 'user', content: toolResults })
       if (handled) { session.messages.push({ role: 'assistant', content: '(handled by the calendar import)' }); trimSessionSafely(session); return null }
 
-      // A fallback reply from the first tool result, in case the follow-up fails.
-      const firstResult = toolResults[0].content
+      if (firstResult == null) firstResult = toolResults[0].content
+      lastResults = toolResults.map(r => r.content)
 
-      try {
-        const followUp = await anthropic.messages.create({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 500,
-          tools: OWNER_TOOLS_CACHED,
-          system: `You are a business management assistant for ${business.business_name}. Be concise — this is SMS. Summarize the tool result naturally. Today is ${todayFull} (${today}). The local time right now is ${new Date().toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' })} (${tz}).`,
-          messages: session.messages
-        })
-        try { require('../utils/usage').recordModel({ businessId: business.id, kind: 'owner', model: 'claude-sonnet-4-6', usage: followUp.usage }) } catch {}
-        const followText = followUp.content.find(c => c.type === 'text')
-        const reply = followText?.text || firstResult
+      if (rounds >= MAX_ROUNDS) {
+        // Never leave a tool_use as the last turn: close it with what the tools said.
+        const reply = lastResults.filter(Boolean).join('\n')
         session.messages.push({ role: 'assistant', content: reply })
-        // Never let a tool_use block be the last saved turn without its result.
         trimSessionSafely(session)
         return reply
-      } catch(followErr) {
-        // Follow-up failed. Return the raw result BUT reset the session so the
-        // broken tool-call turns don't poison every future message. (This is the
-        // exact failure mode that caused the repeated 400s.)
+      }
+
+      try {
+        response = await callOwnerModel()
+      } catch (followErr) {
+        // Follow-up failed. Return what the tools actually did, BUT reset the
+        // session so broken tool-call turns don't poison every future message.
         console.error('[Owner] Follow-up call failed:', followErr.message)
         session.messages = []
-        return typeof firstResult === 'string' ? firstResult : JSON.stringify(firstResult)
+        return lastResults.filter(Boolean).join('\n') || firstResult
       }
     }
 
     // Plain text response
-    const text = response.content.find(c => c.type === 'text')
-    const reply = text?.text || "Got it! Let me know if you need anything else."
+    const text = response.content.filter(c => c.type === 'text').map(c => c.text).join('\n').trim()
+    const reply = text || lastResults.filter(Boolean).join('\n') || "Got it! Let me know if you need anything else."
     session.messages.push({ role: 'assistant', content: reply })
     trimSessionSafely(session)
     return reply
