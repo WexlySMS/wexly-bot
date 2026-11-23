@@ -7,7 +7,9 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 
 // List prices, USD per million tokens. Override with env if Anthropic changes them.
 const MODEL_PRICES = {
-  default: { input: 3, output: 15, cache_write: 3.75, cache_read: 0.30 }
+  default: { input: 3, output: 15, cache_write: 3.75, cache_read: 0.30 },
+  'claude-opus-5-5': { input: 4, output: 20, cache_write: 5, cache_read: 0.20 },
+  'claude-sonnet-5-5': { input: 2, output: 10, cache_write: 2.5, cache_read: 0.10 }
 }
 // Twilio US list prices in cents. Outbound carries the 10DLC carrier fee (about 0.3c avg).
 const SMS_CENTS = { out: Number(process.env.SMS_COST_CENTS_OUT || 1.13), in: Number(process.env.SMS_COST_CENTS_IN || 0.83), mms_extra: Number(process.env.MMS_EXTRA_CENTS || 1.2) }

@@ -1864,7 +1864,7 @@ function noteOwnerOutbound(businessId, text) {
 // tool_result), which the API rejects with a 400. This trims to ~10 messages but
 // never leaves the first message as a tool_result, and drops a dangling final
 // assistant turn whose tool_use has no following tool_result.
-function trimSessionSafely(session, max = 10) {
+function trimSessionSafely(session, max = 20) {
   let msgs = session.messages
   if (msgs.length > max) msgs = msgs.slice(-max)
   // Don't let the window START on a tool_result (its tool_use was sliced off).
@@ -1876,6 +1876,19 @@ function trimSessionSafely(session, max = 10) {
     msgs = msgs.slice(0, -1)
   }
   session.messages = msgs
+}
+
+const OWNER_MODEL = process.env.OWNER_MODEL || 'claude-opus-5-5'
+const OWNER_FALLBACK_MODEL = 'claude-sonnet-4-6'
+const OWNER_EFFORT = process.env.OWNER_EFFORT || 'medium'
+let ownerModelDownUntil = 0
+// Remove thinking blocks (and any assistant turn left empty by that) for a model that can't read them.
+function stripThinking(messages) {
+  return messages.map(m => {
+    if (!Array.isArray(m.content)) return m
+    const c = m.content.filter(b => b && b.type !== 'thinking' && b.type !== 'redacted_thinking')
+    return { ...m, content: c.length ? c : [{ type: 'text', text: '(no reply)' }] }
+  })
 }
 
 // ── Main owner message handler ──────────────────────────────────────────────
@@ -1957,9 +1970,27 @@ RULES:
       { type: 'text', text: `RIGHT NOW: Today is ${todayFull} (${today}). The local time is ${new Date().toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' })} (${tz}).` }],
       messages: session.messages
     }
+    // v231: the owner bot runs on Opus 5.5 (OWNER_MODEL). It always thinks, and thinking
+    // counts against max_tokens, so the cap is higher than the SMS-sized 500. If the new
+    // model is rejected for any reason (bad id, account access, request shape) the SAME
+    // request is retried on Sonnet 4.6 so an owner never gets a dead bot; thinking blocks
+    // are stripped for that retry because 4.6 can't read them.
     const callOwnerModel = async () => {
-      const r = await anthropic.messages.create({ ...ownerParams, messages: session.messages })
-      try { require('../utils/usage').recordModel({ businessId: business.id, kind: 'owner', model: 'claude-sonnet-4-6', usage: r.usage }) } catch {}
+      const rec = (model, r) => { try { require('../utils/usage').recordModel({ businessId: business.id, kind: 'owner', model, usage: r.usage }) } catch {} }
+      if (OWNER_MODEL !== OWNER_FALLBACK_MODEL && Date.now() > ownerModelDownUntil) {
+        try {
+          const r = await anthropic.messages.create({ ...ownerParams, model: OWNER_MODEL, max_tokens: 4096, output_config: { effort: OWNER_EFFORT }, messages: session.messages })
+          rec(OWNER_MODEL, r)
+          return r
+        } catch (e) {
+          const st = e?.status
+          if (st === 429 || st === 529 || (st >= 500 && st < 600 && st !== 529)) { /* busy: fall through to the fallback for this text only */ }
+          else if (st === 404 || st === 403 || st === 401) ownerModelDownUntil = Date.now() + 15 * 60e3   // no access: stop trying for a while
+          console.error(`[OwnerModel] ${OWNER_MODEL} failed (${st || ''} ${String(e?.message).slice(0, 200)}), falling back to ${OWNER_FALLBACK_MODEL}`)
+        }
+      }
+      const r = await anthropic.messages.create({ ...ownerParams, model: OWNER_FALLBACK_MODEL, messages: stripThinking(session.messages) })
+      rec(OWNER_FALLBACK_MODEL, r)
       return r
     }
     let response = await callOwnerModel()
@@ -2034,6 +2065,10 @@ RULES:
       }
     }
 
+    if (response.stop_reason === 'refusal') {
+      const reply = "I can't help with that one by text."
+      session.messages.push({ role: 'assistant', content: reply }); trimSessionSafely(session); return reply
+    }
     // Plain text response
     const text = response.content.filter(c => c.type === 'text').map(c => c.text).join('\n').trim()
     const reply = text || lastResults.filter(Boolean).join('\n') || "Got it! Let me know if you need anything else."
