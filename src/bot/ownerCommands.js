@@ -95,11 +95,12 @@ const OWNER_TOOLS = [
   },
   {
     name: 'running_late',
-    description: 'Alert all customers with appointments today that the owner is running late. Bot texts each one automatically.',
+    description: 'Text customers with appointments still to come today that the owner is running late. By default it texts EVERY remaining client. If the owner names a scope ("text my first client", "just my next one", "my next two"), set limit to that number so only those clients are texted. For one client by name, use message_client instead.',
     input_schema: {
       type: 'object',
       properties: {
         minutes: { type: 'number', description: 'How many minutes late' },
+        limit: { type: 'number', description: 'Only text this many clients, starting with the next appointment. 1 = only the first/next client. Omit to text everyone left today.' },
         message: { type: 'string', description: 'Optional custom message to include' }
       },
       required: ['minutes']
@@ -796,10 +797,15 @@ async function executeOwnerTool(toolName, input, business) {
 
       if (!appts?.length) return `No more appointments today (it's ${formatTime(currentTime)} your time), so there's nobody to notify.`
 
+      // v229: "text my first client" = limit 1. Only the next N get the heads up.
+      const lim = Number.isFinite(+input.limit) && +input.limit >= 1 ? Math.floor(+input.limit) : 0
+      const targets = lim ? appts.slice(0, lim) : appts
+      const names = []
+
       const { sendSMS } = require('../utils/sms')
       let notified = 0
 
-      for (const appt of appts) {
+      for (const appt of targets) {
         const firstName = appt.customer_name?.split(' ')[0] || 'there'
         const timeStr = formatTime(appt.appointment_time)
         if (!appt.customer_phone || String(appt.customer_phone).replace(/\D/g, '').length < 10) continue
@@ -812,12 +818,18 @@ async function executeOwnerTool(toolName, input, business) {
           const r = await sendSMS(business.sms_number, appt.customer_phone, msg)
           if (!r?.success) continue
           notified++
+          names.push(`${firstName} (${timeStr})`)
           await new Promise(r => setTimeout(r, 300))
         } catch (err) {
           console.error(`[LateAlert] Failed for ${appt.customer_name}:`, err.message)
         }
       }
 
+      if (lim) {
+        const skipped = appts.length - targets.length
+        if (!notified) return `I couldn't text ${targets.length === 1 ? 'your next client' : 'those clients'}: no working number on file. Nobody was notified.`
+        return `✅ Texted ${names.join(', ')} that you're running ${minutes} minutes late.${skipped ? ` Your other ${skipped} client${skipped !== 1 ? 's' : ''} today ${skipped !== 1 ? 'were' : 'was'} not texted.` : ''}`
+      }
       return `✅ Done! Notified ${notified} of ${appts.length} remaining client${appts.length !== 1 ? 's' : ''} that you're running ${minutes} minutes late.${notified < appts.length ? ' The rest have no number on file or opted out.' : ''}`
     }
 
