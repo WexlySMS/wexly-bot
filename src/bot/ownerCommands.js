@@ -479,6 +479,10 @@ const OWNER_TOOLS = [
 ]
 
 // v216: static tool list = first prompt-cache breakpoint on every owner call.
+// v230: general building-block tools (look_up, text_clients, change_*, cant_do).
+// These let the bot handle requests nobody scripted. See ownerGeneral.js.
+const ownerGeneral = require('./ownerGeneral')
+OWNER_TOOLS.push(...ownerGeneral.GENERAL_TOOLS)
 const OWNER_TOOLS_CACHED = OWNER_TOOLS.map((t, i) => i === OWNER_TOOLS.length - 1 ? { ...t, cache_control: { type: 'ephemeral' } } : t)
 
 // ── Handle owner tool calls ─────────────────────────────────────────────────
@@ -513,6 +517,7 @@ function liveAppointmentsFor(business, input, today) {
 async function executeOwnerTool(toolName, input, business) {
   const tz = business.timezone || 'America/New_York'
   const today = new Date().toLocaleDateString('en-CA', { timeZone: tz })
+  if (ownerGeneral.GENERAL_NAMES.has(toolName)) return ownerGeneral.executeGeneralTool(toolName, input, business, today, { noteClientThread })
 
   switch (toolName) {
 
@@ -1892,6 +1897,7 @@ async function handleOwnerMessageInner(business, incomingText, mediaUrls = []) {
   if (Array.isArray(mediaUrls) && mediaUrls.length) { session.lastMedia = mediaUrls.slice(0, 8); session.lastText = incomingText }
   const userText = (incomingText || '') + (mediaUrls?.length ? `\n[The owner attached ${mediaUrls.length} photo${mediaUrls.length === 1 ? '' : 's'} to this text. If they look like calendar screenshots or they mention appointments/schedule, call import_appointments with source=photos.]` : '')
   session.messages.push({ role: 'user', content: userText || '[empty text]' })
+  ownerGeneral.beginTurn(business.id)   // confirmations must come from a later owner text
 
   // Trim old context safely (never split a tool_use/tool_result pair)
   trimSessionSafely(session)
@@ -1932,6 +1938,11 @@ You can help them:
 FACTS YOU MAY NEED:
 - Card deposits, tips and checkouts go straight into the owner's own Stripe account, so Stripe decides when the money reaches their bank (2 business days by default). If they ask how to get paid faster: in Stripe, Settings > Payouts (https://dashboard.stripe.com/settings/payouts), turn on next-day settlement (next business day, small Stripe fee; brand-new Stripe accounts may not be eligible yet), or use Instant Payouts from their Stripe balance for money in minutes for a fee. Wexly never holds their money. Payment-link deposits (Venmo, Zelle, PayPal, Square) go to them directly.
 
+HOW TO HANDLE ANYTHING ELSE (this matters most):
+The list above is examples, not limits. You also have general tools that reach everything in the app: look_up (read any appointments, clients, services, staff, blocked days, payments, waitlist, products, settings, conversations), text_clients (text any set of clients), change_appointments (move, cancel, confirm, reassign, edit any bookings), change_client, change_settings. When a request does not match a specific tool exactly, work it out: look_up what you need, then act with the general tools, in as many steps as it takes, before you reply. Take the owner literally about scope: "my first client" is one person, "everyone after 2" is only those people. Examples: "text my first client I'm 10 late" = look_up today's appointments, limit 1, then text_clients with that id. "Move everyone tomorrow back an hour" = look_up tomorrow, then change_appointments with shift_minutes 60 and a notify_message. "Who hasn't confirmed for Friday" = look_up Friday with status pending.
+Only when no tool or combination can do it, call cant_do, then say so plainly. Never just refuse, and never claim something a tool result did not confirm.
+When a tool returns PREVIEW, nothing has happened yet: show the owner the preview in your own words and ask for a yes.
+
 RULES:
 - Be concise — this is SMS.
 - When the owner says "cancel" or mentions an appointment, ask: "Would you like to cancel only, or cancel and reschedule (I'll text the customer to pick a new time)?"
@@ -1965,7 +1976,7 @@ RULES:
     // the model answers in plain text (max 6 rounds).
     // IMPORTANT: a single response can contain MULTIPLE tool_use blocks; the API
     // requires a matching tool_result for EVERY one, in the very next user turn.
-    const MAX_ROUNDS = 6
+    const MAX_ROUNDS = 8
     let rounds = 0
     let firstResult = null
     let lastResults = []
