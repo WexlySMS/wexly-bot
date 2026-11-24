@@ -4103,10 +4103,21 @@ app.get('/tracking-pixels', async (req, res) => {
     const sb = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
     const { data } = await sb.from('tracking_pixels').select('type, value, active').eq('active', true)
 
+    // Meta: one loader, init every active pixel, then a single PageView. Emitting one
+    // snippet per pixel would make the second fbq('track') fire to both ids and
+    // double-count PageView on the first.
+    var metaIds = (data || []).filter(function(p) { return p.type === 'meta' && /^\d{5,20}$/.test(String(p.value || '').trim()) })
+      .map(function(p) { return String(p.value).trim() })
+      .filter(function(id, i, a) { return a.indexOf(id) === i })
+    var metaScript = metaIds.length
+      ? "!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');"
+        + metaIds.map(function(id) { return "fbq('init','" + id + "');" }).join('') + "fbq('track','PageView');"
+      : ''
+
     var scripts = (data || []).map(function(p) {
       switch(p.type) {
         case 'meta':
-          return "!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');fbq('init','" + p.value + "');fbq('track','PageView');"
+          return ''
         case 'tiktok':
           return "!function(w,d,t){w.TiktokAnalyticsObject=t;var ttq=w[t]=w[t]||[];ttq.methods=['page','track','identify','instances','debug','on','off','once','ready','alias','group','enableCookie','disableCookie'],ttq.setAndDefer=function(t,e){t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}};for(var i=0;i<ttq.methods.length;i++)ttq.setAndDefer(ttq,ttq.methods[i]);ttq.instance=function(t){for(var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n]);return e};ttq.load=function(e,n){var i='https://analytics.tiktok.com/i18n/pixel/events.js';ttq._i=ttq._i||{};ttq._i[e]=[];ttq._i[e]._u=i;ttq._t=ttq._t||{};ttq._t[e]=+new Date;ttq._o=ttq._o||{};ttq._o[e]=n||{};var o=document.createElement('script');o.type='text/javascript';o.async=!0;o.src=i+'?sdkid='+e+'&lib='+t;var a=document.getElementsByTagName('script')[0];a.parentNode.insertBefore(o,a)}}(window,document,'ttq');ttq.load('" + p.value + "');ttq.page();"
         case 'ga4':
@@ -4119,6 +4130,7 @@ app.get('/tracking-pixels', async (req, res) => {
           return ''
       }
     }).filter(Boolean)
+    if (metaScript) scripts.unshift(metaScript)
 
     res.set('Cache-Control', 'public, max-age=300')
     res.set('Access-Control-Allow-Origin', '*')
