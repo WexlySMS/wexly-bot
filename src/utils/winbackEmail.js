@@ -8,7 +8,7 @@
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 
 const SUBJECT = 'Wexly now starts at $39 a month'
-const PREHEADER = 'It was $79. Text one number to run your calendar. Your account is still here.'
+const PREHEADER = 'It was $79. Run your calendar from the app or by text. Your account is still here.'
 const LINK = 'https://getwexly.com/login.html?plan=desk&utm_source=email&utm_medium=email&utm_campaign=winback39'
 const APP_LINK = 'https://apps.apple.com/app/id6828181888'
 const UNSUB = 'mailto:hello@getwexly.com?subject=Unsubscribe'
@@ -60,7 +60,7 @@ function winbackHtml({ firstName, businessName, postalAddress } = {}) {
 
   <tr><td style="padding:34px 30px 0;">
     <div style="font:17px/1.5 ${SANS};color:${GREY};">Hi ${name},</div>
-    <div style="font:42px/1.06 ${SERIF};color:${INK};letter-spacing:-1.2px;padding-top:8px;">Run your whole day by text. Now for half the price.</div>
+    <div style="font:42px/1.06 ${SERIF};color:${INK};letter-spacing:-1.2px;padding-top:8px;">Run your day from your phone. Now for half the price.</div>
   </td></tr>
 
   <tr><td style="padding:26px 30px 0;">
@@ -73,15 +73,15 @@ function winbackHtml({ firstName, businessName, postalAddress } = {}) {
           <div style="font:15px ${SANS};color:#C9C7BE;padding-top:2px;">a month</div>
         </td>
       </tr></table>
-      <div style="font:16px/1.5 ${SANS};color:#C9C7BE;padding:14px 0 22px;">Wexly used to start at $79. Our new plan is $39. You text one number and it runs your calendar for you. You still talk to your own clients.</div>
+      <div style="font:16px/1.5 ${SANS};color:#C9C7BE;padding:14px 0 22px;">Wexly used to start at $79. Our new plan is $39. Tell it what you need, in the app or by text, and it runs your calendar. You still talk to your own clients.</div>
       ${button(LINK, 'Come back for $39', MINT, INK, true)}
       <div style="font:13px ${SANS};color:#8F8D85;text-align:center;padding-top:12px;">Month to month. Cancel any time.</div>
     </td></tr></table>
   </td></tr>
 
   <tr><td style="padding:38px 30px 0;">
-    <div style="font:28px/1.15 ${SERIF};color:${INK};letter-spacing:-0.6px;">This is the whole app.</div>
-    <div style="font:16px/1.5 ${SANS};color:${GREY};padding-top:6px;">No menus to learn. You text Wexly, and it updates your calendar and lets your clients know.</div>
+    <div style="font:28px/1.15 ${SERIF};color:${INK};letter-spacing:-0.6px;">Tell it what you need.</div>
+    <div style="font:16px/1.5 ${SANS};color:${GREY};padding-top:6px;">Tap it in the Wexly app or text your Wexly number. Either way your calendar is updated and your clients are told.</div>
     <table role="presentation" align="center" cellpadding="0" cellspacing="0" border="0" bgcolor="${INK}" style="margin:22px auto 0;background:${INK};border-radius:38px;width:100%;max-width:340px;"><tr><td style="padding:10px;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF" style="background:#FFFFFF;border-radius:29px;">
         <tr><td align="center" style="padding:16px 14px 10px;border-bottom:1px solid ${LINE};">
@@ -103,8 +103,21 @@ function winbackHtml({ firstName, businessName, postalAddress } = {}) {
   </td></tr>
 
   <tr><td style="padding:30px 30px 0;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E3F3EA" style="background:#E3F3EA;border-radius:20px;"><tr><td style="padding:24px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+        <td width="64" valign="top"><img src="https://getwexly.com/icon-192.png" width="52" height="52" alt="Wexly app icon" style="display:block;border-radius:13px;border:0;"></td>
+        <td valign="top">
+          <div style="font:24px/1.15 ${SERIF};color:${INK};letter-spacing:-0.4px;">The easiest way to run it: the iPhone app.</div>
+          <div style="font:16px/1.5 ${SANS};color:#3F5F50;padding-top:5px;">Your calendar, your clients and your commands, one tap away.</div>
+        </td>
+      </tr></table>
+      <div style="padding-top:18px;">${button(APP_LINK, 'Download on the App Store', INK, '#FFFFFF', true)}</div>
+    </td></tr></table>
+  </td></tr>
+
+  <tr><td style="padding:30px 30px 0;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-      ${point('Clear or change a day with one text', 'Out sick or running late? Wexly updates your calendar and texts your clients to let them know.')}
+      ${point('Clear or change a day in seconds', 'Out sick or running late? Wexly updates your calendar and texts your clients to let them know.')}
       ${point('Reminders go out on their own', 'Every client gets one before their appointment, so fewer no-shows.')}
       ${point('We move you in for free', 'Send us your current services and bookings and we set them up for you.')}
     </table>
@@ -114,26 +127,13 @@ function winbackHtml({ firstName, businessName, postalAddress } = {}) {
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid ${LINE};border-radius:16px;">
       <tr><td style="padding:18px 18px 14px;">
         <div style="font:bold 13px ${SANS};color:${GREEN};">What Solo Desk does</div>
-        <div style="font:16px/1.5 ${SANS};color:${INK};padding-top:5px;">You text it to book, move, cancel and block time. It sends your clients their reminders and updates. When a client texts your number, they get a quick note that you will reply, and the message is passed to you.</div>
+        <div style="font:16px/1.5 ${SANS};color:${INK};padding-top:5px;">You tell it to book, move, cancel and block time, in the app or by text. It sends your clients their reminders and updates. When a client texts your number, they get a quick note that you will reply, and the message is passed to you.</div>
       </td></tr>
       <tr><td style="padding:14px 18px 18px;border-top:1px solid ${LINE};">
         <div style="font:bold 13px ${SANS};color:#8A887F;">What it does not do</div>
         <div style="font:16px/1.5 ${SANS};color:${GREY};padding-top:5px;">It does not hold conversations with your clients or book them for you. If you want that, Solo does it for $79 a month.</div>
       </td></tr>
     </table>
-  </td></tr>
-
-  <tr><td style="padding:30px 30px 0;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E3F3EA" style="background:#E3F3EA;border-radius:20px;"><tr><td style="padding:24px;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-        <td width="64" valign="top"><img src="https://getwexly.com/icon-192.png" width="52" height="52" alt="Wexly app icon" style="display:block;border-radius:13px;border:0;"></td>
-        <td valign="top">
-          <div style="font:24px/1.15 ${SERIF};color:${INK};letter-spacing:-0.4px;">Wexly is on the iPhone.</div>
-          <div style="font:16px/1.5 ${SANS};color:#3F5F50;padding-top:5px;">Your calendar, your clients and every conversation, in your pocket.</div>
-        </td>
-      </tr></table>
-      <div style="padding-top:18px;">${button(APP_LINK, 'Download on the App Store', INK, '#FFFFFF', true)}</div>
-    </td></tr></table>
   </td></tr>
 
   <tr><td align="center" style="padding:36px 30px 36px;">
