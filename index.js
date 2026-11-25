@@ -1280,7 +1280,7 @@ app.get('/admin/stats', async (req, res) => {
 // ── Admin: send announcement email to all subscribers ─────────────────────────
 app.post('/admin/announce', async (req, res) => {
   if (!isValidAdminSecret(req.headers['x-admin-secret'])) return res.status(403).json({ error: 'Forbidden' })
-  const { filter, template, testTo, dryRun, list, emails } = req.body
+  const { filter, template, testTo, dryRun, list, emails, extraEmails, onlyExtra } = req.body
   const winback = template === 'winback' ? require('./src/utils/winbackEmail') : null
   const subject = req.body.subject || (winback && winback.SUBJECT)
   const message = req.body.message || ''
@@ -1314,6 +1314,15 @@ app.post('/admin/announce', async (req, res) => {
     if (Array.isArray(emails)) {
       const picked = new Set(emails.map(e => String(e).trim().toLowerCase()))
       businesses = businesses.filter(b => picked.has(String(b.email).trim().toLowerCase()))
+    }
+    // Addresses typed in by hand. If one belongs to an account, its name and business are used.
+    if (Array.isArray(extraEmails) && extraEmails.length) {
+      const typed = [...new Set(extraEmails.map(e => String(e).trim().toLowerCase()).filter(e => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)))].slice(0, 500)
+      if (onlyExtra) businesses = []
+      const have = new Set(businesses.map(b => String(b.email).trim().toLowerCase()))
+      const { data: known } = await sb.from('businesses').select('email, owner_name, business_name, plan, status').in('email', typed)
+      const byEmail = new Map((known || []).map(b => [String(b.email).trim().toLowerCase(), b]))
+      for (const e of typed) if (!have.has(e)) businesses.push(byEmail.get(e) || { email: e, owner_name: '', business_name: '' })
     }
     if (dryRun) return res.json({ wouldSend: businesses.length })
     // Test send: one copy to the given address, using the first match as sample data.

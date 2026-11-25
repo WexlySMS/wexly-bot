@@ -42,7 +42,7 @@ function point(title, body) {
 
 function winbackHtml({ firstName, businessName, postalAddress } = {}) {
   const name = esc(firstName || 'there')
-  const biz = businessName ? esc(businessName) : 'your business'
+  const biz = businessName ? esc(businessName) : ''
   const address = esc(postalAddress || ADDRESS)
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light only"><meta name="supported-color-schemes" content="light only"><title>${SUBJECT}</title></head>
@@ -137,7 +137,7 @@ function winbackHtml({ firstName, businessName, postalAddress } = {}) {
   </td></tr>
 
   <tr><td align="center" style="padding:36px 30px 36px;">
-    <div style="font:26px/1.2 ${SERIF};color:${INK};letter-spacing:-0.5px;">Your account for ${biz} is still here.</div>
+    <div style="font:26px/1.2 ${SERIF};color:${INK};letter-spacing:-0.5px;">${biz ? `Your account for ${biz} is still here.` : 'Your account is still here.'}</div>
     <div style="font:16px/1.5 ${SANS};color:${GREY};padding:8px 0 20px;">Sign in, pick Solo Desk, and you are back on in a minute.</div>
     ${button(LINK, 'Come back for $39', GREEN, '#FFFFFF', false)}
     <div style="font:15px/1.5 ${SANS};color:${GREY};padding-top:16px;">Questions? Reply to this email and a person answers.</div>
