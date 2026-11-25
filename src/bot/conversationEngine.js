@@ -38,6 +38,7 @@ async function withBookingLock(businessId, date, fn) {
   }
 }
 const db = require('../db/client')
+const trades = require('./trades')
 require('dotenv').config()
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
@@ -190,7 +191,7 @@ Your name is ${botName}. If a customer asks your name, tell them you're ${botNam
 
 ## YOUR LOCATION
 ${locationContext}
-
+${trades.tradesPromptBlock(business) ? '\n' + trades.tradesPromptBlock(business) + '\n' : ''}
 ## YOUR ROLE
 Help customers via SMS to:
 1. Book an appointment
@@ -674,7 +675,7 @@ async function executeTool(toolName, input, context) {
       const service = requestedSvcs.length > 1
         ? requestedSvcs.reduce((w, s) => ({ ...w, earliest_start: [w.earliest_start, s.earliest_start].filter(Boolean).sort().pop() || null, latest_start: [w.latest_start, s.latest_start].filter(Boolean).sort()[0] || null }), { ...requestedSvcs[0], name: requestedSvcs.map(s => s.name).join(' + '), earliest_start: null, latest_start: null })
         : (requestedSvcs[0] || profile.services[0])
-      const duration = input.total_duration_mins || (requestedSvcs.length ? requestedSvcs.reduce((sum, s) => sum + (s.duration_mins || 60), 0) : (service?.duration_mins || 60))
+      const duration = trades.slotMins(business, input.total_duration_mins || (requestedSvcs.length ? requestedSvcs.reduce((sum, s) => sum + (s.duration_mins || 60), 0) : (service?.duration_mins || 60)))
       const capacity = requestedSvcs.length ? Math.min(...requestedSvcs.map(s => s.capacity || 1)) : (service?.capacity || 1)
 
       // For class/group services — check remaining capacity
@@ -791,7 +792,7 @@ async function executeTool(toolName, input, context) {
       }
       const serviceForCap = requested[0] || profile.services[0]
       const capacity = requested.length ? Math.min(...requested.map(s => s.capacity || 1)) : (serviceForCap?.capacity || 1)
-      const comboDuration = input.total_duration_mins || (requested.length ? requested.reduce((sum, s) => sum + (s.duration_mins || 60), 0) : (serviceForCap?.duration_mins || 60))
+      const comboDuration = trades.slotMins(business, input.total_duration_mins || (requested.length ? requested.reduce((sum, s) => sum + (s.duration_mins || 60), 0) : (serviceForCap?.duration_mins || 60)))
       // A combo honours the tightest start window among its services.
       const comboWindow = requested.length > 1 ? requested.reduce((w, s) => ({ earliest_start: [w.earliest_start, s.earliest_start].filter(Boolean).sort().pop() || null, latest_start: [w.latest_start, s.latest_start].filter(Boolean).sort()[0] || null, name: w.name }), { name: requested.map(s => s.name).join(' + ') }) : serviceForCap
 
@@ -1663,7 +1664,8 @@ function sessionStateOf(session) {
     qualification: session.qualification || null,
     pendingIntake: session.pendingIntake || null,
     pendingBooking: session.pendingBooking || null,
-    lastAppointmentId: session.lastAppointmentId || null
+    lastAppointmentId: session.lastAppointmentId || null,
+    tradesEmergencyAt: session.tradesEmergencyAt || null
   }
 }
 
@@ -1886,8 +1888,32 @@ async function handleIncomingMessage({ business, customerPhone, incomingText, me
     }
   }
 
+  // ── Trades mode: emergencies page the owner at once ───────────────────────
+  // Only for businesses with pro_settings.trades. Runs before the generic
+  // escalation check so "emergency" gets the owner a call-now text and the
+  // customer a useful reply, instead of the bot stepping back for two hours.
+  // Once per conversation: a second "it's flooding!" shouldn't re-page.
+  const tradesHit = !session.tradesEmergencyAt || (Date.now() - session.tradesEmergencyAt) > 2 * 60 * 60 * 1000
+    ? trades.detectTradesEmergency(business, incomingText) : null
+  if (tradesHit) {
+    console.log(`[Trades] emergency (${tradesHit.kind}) "${tradesHit.trigger}" from ${customerPhone}`)
+    session.tradesEmergencyAt = Date.now()
+    await db.flagSession(business.id, customerPhone, `EMERGENCY: "${incomingText}"`, { manualMinutes: 0 })
+    trades.alertOwnerEmergency(business, { customerPhone, customerName: returningCustomer?.customer_name || null, customerMessage: incomingText, hit: tradesHit })
+      .catch(err => console.error('[Trades] owner alert failed:', err.message))
+    try { require('../utils/push').pushEscalation(business, { customerPhone, customerMessage: incomingText, trigger: 'EMERGENCY' }).catch(() => {}) } catch (e) {}
+    const reply = trades.emergencyReply(business, tradesHit)
+    session.messages.push({ role: 'user', content: incomingText, media: mediaUrls.length ? mediaUrls : undefined })
+    session.messages.push({ role: 'assistant', content: reply })
+    await db.upsertSession(business.id, customerPhone, session.messages, session.lastAppointmentId, sessionStateOf(session))
+    return reply
+  }
+
   // ── Check for escalation triggers ─────────────────────────────────────────
-  const escalation = detectEscalation(incomingText)
+  let escalation = detectEscalation(incomingText)
+  // Trades mode already paged the owner for this emergency; a repeat of the
+  // word shouldn't also trigger the generic two-hour handoff.
+  if (escalation && /emergency/i.test(escalation.trigger) && trades.tradesSettings(business)?.emergencyAlert) escalation = null
   if (escalation) {
     const escalationTrigger = escalation.trigger
     console.log(`[Escalation] ${escalation.tier} triggered by "${escalationTrigger}" from ${customerPhone}`)

@@ -60,6 +60,7 @@ async function getSession(businessId, customerPhone) {
     if (data.session_state.pendingIntake !== undefined) data.pendingIntake = data.session_state.pendingIntake
     if (data.session_state.pendingBooking !== undefined) data.pendingBooking = data.session_state.pendingBooking
     if (data.session_state.lastAppointmentId !== undefined && !data.lastAppointmentId) data.lastAppointmentId = data.session_state.lastAppointmentId
+    if (data.session_state.tradesEmergencyAt) data.tradesEmergencyAt = data.session_state.tradesEmergencyAt
   }
   return data
 }
@@ -172,7 +173,7 @@ async function getAppointmentsNeedingReminders() {
 
   const { data } = await supabase
     .from('appointments')
-    .select('*, businesses(sms_number, business_name, timezone, location_type, meeting_link)')
+    .select('*, businesses(sms_number, business_name, timezone, location_type, meeting_link, pro_settings)')
     .in('appointment_date', [day0, day1Str, day2Str])
     .eq('status', 'confirmed')
     .eq('reminder_sent', false)

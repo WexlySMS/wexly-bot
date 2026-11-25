@@ -39,7 +39,7 @@ async function sendReminders() {
       const tz2 = appt.businesses?.timezone || 'America/New_York'
       const apptDate = new Date(appt.appointment_date + 'T12:00:00')
       const dayName = apptDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: tz2 })
-      let msg = `Hi ${appt.customer_name}! 👋 Just a reminder about your appointment at ${bizName} tomorrow (${dayName}) at ${formatTime(appt.appointment_time)}. Reply YES to confirm or NO to cancel.`
+      let msg = `Hi ${appt.customer_name}! 👋 Just a reminder about your appointment at ${bizName} tomorrow (${dayName}) ${require('./trades').arrivalPhrase(appt.businesses, appt.appointment_time)}. Reply YES to confirm or NO to cancel.`
 
       // For virtual businesses, include the meeting link right in the reminder
       // so the customer has it handy. Same link logic as booking confirmations.
