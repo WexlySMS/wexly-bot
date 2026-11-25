@@ -8,7 +8,7 @@
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 
 const SUBJECT = 'Wexly now starts at $39 a month'
-const PREHEADER = 'It was $79. Text one number and your day gets handled. Your account is still here.'
+const PREHEADER = 'It was $79. Text one number to run your calendar. Your account is still here.'
 const LINK = 'https://getwexly.com/login.html?plan=desk&utm_source=email&utm_medium=email&utm_campaign=winback39'
 const APP_LINK = 'https://apps.apple.com/app/id6828181888'
 const UNSUB = 'mailto:hello@getwexly.com?subject=Unsubscribe'
@@ -73,7 +73,7 @@ function winbackHtml({ firstName, businessName, postalAddress } = {}) {
           <div style="font:15px ${SANS};color:#C9C7BE;padding-top:2px;">a month</div>
         </td>
       </tr></table>
-      <div style="font:16px/1.5 ${SANS};color:#C9C7BE;padding:14px 0 22px;">Wexly used to start at $79. Our new plan is $39: you text one number and it handles your calendar and your clients.</div>
+      <div style="font:16px/1.5 ${SANS};color:#C9C7BE;padding:14px 0 22px;">Wexly used to start at $79. Our new plan is $39. You text one number and it runs your calendar for you. You still talk to your own clients.</div>
       ${button(LINK, 'Come back for $39', MINT, INK, true)}
       <div style="font:13px ${SANS};color:#8F8D85;text-align:center;padding-top:12px;">Month to month. Cancel any time.</div>
     </td></tr></table>
@@ -81,7 +81,7 @@ function winbackHtml({ firstName, businessName, postalAddress } = {}) {
 
   <tr><td style="padding:38px 30px 0;">
     <div style="font:28px/1.15 ${SERIF};color:${INK};letter-spacing:-0.6px;">This is the whole app.</div>
-    <div style="font:16px/1.5 ${SANS};color:${GREY};padding-top:6px;">No menus to learn. You text it the way you would text an assistant.</div>
+    <div style="font:16px/1.5 ${SANS};color:${GREY};padding-top:6px;">No menus to learn. You text Wexly, and it updates your calendar and lets your clients know.</div>
     <table role="presentation" align="center" cellpadding="0" cellspacing="0" border="0" bgcolor="${INK}" style="margin:22px auto 0;background:${INK};border-radius:38px;width:100%;max-width:340px;"><tr><td style="padding:10px;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF" style="background:#FFFFFF;border-radius:29px;">
         <tr><td align="center" style="padding:16px 14px 10px;border-bottom:1px solid ${LINE};">
@@ -91,11 +91,11 @@ function winbackHtml({ firstName, businessName, postalAddress } = {}) {
         <tr><td style="padding:14px 12px 18px;">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
             ${bubble(true, 'Sick tomorrow')}
-            ${bubble(false, 'Got it. I texted your 6 clients for tomorrow and offered each one a new time.')}
+            ${bubble(false, 'Done. Tomorrow is cleared and your 6 clients have been told.')}
             ${bubble(true, 'Block Friday after 2')}
             ${bubble(false, 'Done. Friday is blocked from 2:00 PM.')}
-            ${bubble(true, "Who's coming in today?")}
-            ${bubble(false, '4 clients. First is Maria at 9:30 AM.')}
+            ${bubble(true, 'Book Maria for a cut Tuesday at 10')}
+            ${bubble(false, 'Booked. Maria gets a reminder the day before.')}
           </table>
         </td></tr>
       </table>
@@ -104,16 +104,23 @@ function winbackHtml({ firstName, businessName, postalAddress } = {}) {
 
   <tr><td style="padding:30px 30px 0;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-      ${point('Move a whole day with one text', 'Out sick or running late? Your clients are told and offered new times.')}
+      ${point('Clear or change a day with one text', 'Out sick or running late? Wexly updates your calendar and texts your clients to let them know.')}
       ${point('Reminders go out on their own', 'Every client gets one before their appointment, so fewer no-shows.')}
       ${point('We move you in for free', 'Send us your current services and bookings and we set them up for you.')}
     </table>
   </td></tr>
 
   <tr><td style="padding:22px 30px 0;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid ${LINE};border-radius:16px;"><tr><td style="padding:16px 18px;font:15px/1.5 ${SANS};color:${GREY};">
-      <b style="color:${INK};">Want it to answer your clients too?</b> Solo is still $79 a month. It does everything above and also replies to your clients and books them by text.
-    </td></tr></table>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid ${LINE};border-radius:16px;">
+      <tr><td style="padding:18px 18px 14px;">
+        <div style="font:bold 13px ${SANS};color:${GREEN};">What Solo Desk does</div>
+        <div style="font:16px/1.5 ${SANS};color:${INK};padding-top:5px;">You text it to book, move, cancel and block time. It sends your clients their reminders and updates. When a client texts your number, they get a quick note that you will reply, and the message is passed to you.</div>
+      </td></tr>
+      <tr><td style="padding:14px 18px 18px;border-top:1px solid ${LINE};">
+        <div style="font:bold 13px ${SANS};color:#8A887F;">What it does not do</div>
+        <div style="font:16px/1.5 ${SANS};color:${GREY};padding-top:5px;">It does not hold conversations with your clients or book them for you. If you want that, Solo does it for $79 a month.</div>
+      </td></tr>
+    </table>
   </td></tr>
 
   <tr><td style="padding:30px 30px 0;">
