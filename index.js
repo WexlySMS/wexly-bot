@@ -1295,7 +1295,9 @@ app.post('/admin/announce', async (req, res) => {
     if (filter === 'active') query = query.eq('status', 'active')
     else if (filter === 'trial') query = query.eq('status', 'trial')
     else if (filter === 'pro') query = query.eq('plan', 'pro')
-    else if (filter === 'expired') query = query.in('status', ['trial_expired', 'cancelled'])
+    // Everyone who isn't a current customer: ended trials, cancellations, failed payments,
+    // and people who signed up early but never finished checkout (any status but active/trial).
+    else if (filter === 'expired') query = query.or('status.is.null,status.not.in.(active,trial)')
     else query = query.in('status', ['active', 'trial']) // default: all active
 
     const { data: found } = await query
