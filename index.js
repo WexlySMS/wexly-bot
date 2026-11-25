@@ -1280,18 +1280,18 @@ app.get('/admin/stats', async (req, res) => {
 // ── Admin: send announcement email to all subscribers ─────────────────────────
 app.post('/admin/announce', async (req, res) => {
   if (!isValidAdminSecret(req.headers['x-admin-secret'])) return res.status(403).json({ error: 'Forbidden' })
-  const { filter, template, testTo, dryRun } = req.body
+  const { filter, template, testTo, dryRun, list, emails } = req.body
   const winback = template === 'winback' ? require('./src/utils/winbackEmail') : null
   const subject = req.body.subject || (winback && winback.SUBJECT)
   const message = req.body.message || ''
-  if (!subject || (!message && !winback)) return res.status(400).json({ error: 'Missing subject or message' })
+  if (!list && !dryRun && (!subject || (!message && !winback))) return res.status(400).json({ error: 'Missing subject or message' })
 
   try {
     const sb = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
     const sgMail = require('@sendgrid/mail')
     sgMail.setApiKey(process.env.SENDGRID_API_KEY)
 
-    let query = sb.from('businesses').select('email, owner_name, business_name, plan, status')
+    let query = sb.from('businesses').select('email, owner_name, business_name, plan, status, created_at').order('created_at', { ascending: false })
     if (filter === 'active') query = query.eq('status', 'active')
     else if (filter === 'trial') query = query.eq('status', 'trial')
     else if (filter === 'pro') query = query.eq('plan', 'pro')
@@ -1306,6 +1306,13 @@ app.post('/admin/announce', async (req, res) => {
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e) || seen.has(e)) return false
       seen.add(e); return true
     })
+    // The admin page shows this list so specific people can be ticked or unticked.
+    if (list) return res.json({ recipients: businesses.map(b => ({ email: String(b.email).trim().toLowerCase(), name: b.owner_name || '', business: b.business_name || '', status: b.status, plan: b.plan, joined: b.created_at })) })
+    // A hand-picked subset: only addresses that are really in this audience are kept.
+    if (Array.isArray(emails)) {
+      const picked = new Set(emails.map(e => String(e).trim().toLowerCase()))
+      businesses = businesses.filter(b => picked.has(String(b.email).trim().toLowerCase()))
+    }
     if (dryRun) return res.json({ wouldSend: businesses.length })
     // Test send: one copy to the given address, using the first match as sample data.
     if (testTo) businesses = [{ ...(businesses[0] || { owner_name: 'Alex Rivera', business_name: 'Your Business' }), email: String(testTo).trim() }]
