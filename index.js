@@ -1319,16 +1319,21 @@ app.post('/admin/announce', async (req, res) => {
     if (!businesses.length) return res.json({ sent: 0 })
 
     let sent = 0
+    // One entry per person so the admin page can show exactly who got it and who didn't.
+    const results = []
+    const record = (biz, error) => results.push({ email: biz.email, name: biz.owner_name || '', business: biz.business_name || '', ok: !error, error: error || undefined })
     for (const biz of businesses) {
       const firstName = biz.owner_name?.split(' ')[0] || 'there'
       if (winback) {
-        await sgMail.send({
-          from: 'Wexly <hello@getwexly.com>', replyTo: 'hello@getwexly.com', to: biz.email,
-          subject: (testTo ? '[TEST] ' : '') + subject,
-          headers: { 'List-Unsubscribe': `<${winback.UNSUB}>` },
-          html: winback.winbackHtml({ firstName, businessName: biz.business_name, postalAddress: process.env.WEXLY_MAIL_ADDRESS })
-        })
-        sent++
+        try {
+          await sgMail.send({
+            from: 'Wexly <hello@getwexly.com>', replyTo: 'hello@getwexly.com', to: biz.email,
+            subject: (testTo ? '[TEST] ' : '') + subject,
+            headers: { 'List-Unsubscribe': `<${winback.UNSUB}>` },
+            html: winback.winbackHtml({ firstName, businessName: biz.business_name, postalAddress: process.env.WEXLY_MAIL_ADDRESS })
+          })
+          sent++; record(biz)
+        } catch (e) { record(biz, e.message) }   // one bad address must not stop the rest
         await new Promise(r => setTimeout(r, 100))
         continue
       }
@@ -1336,6 +1341,7 @@ app.post('/admin/announce', async (req, res) => {
         .replace(/\{name\}/g, firstName)
         .replace(/\{business\}/g, biz.business_name)
 
+      try {
       await sgMail.send({
         from: 'Wexly <hello@getwexly.com>',
         to: biz.email,
@@ -1361,17 +1367,35 @@ app.post('/admin/announce', async (req, res) => {
 </body>
 </html>`
       })
-      sent++
+      sent++; record(biz)
+      } catch (e) { record(biz, e.message) }
       // Small delay to avoid rate limits
       await new Promise(r => setTimeout(r, 100))
     }
 
-    console.log(`[Admin] Announcement sent to ${sent} subscribers`)
-    res.json({ sent, total: businesses.length })
+    console.log(`[Admin] Announcement sent to ${sent} of ${businesses.length}`)
+    // Keep a permanent record of real sends (not tests). Skipped quietly until the table exists.
+    if (!testTo) {
+      try {
+        await sb.from('announcement_log').insert({ subject, template: template || 'plain', audience: Array.isArray(emails) ? `${filter || 'all'} (hand-picked)` : (filter || 'all'), sent, failed: results.length - sent, recipients: results })
+      } catch (e) { console.error('[Admin] announcement_log insert failed:', e.message) }
+    }
+    res.json({ sent, total: businesses.length, results })
   } catch (err) {
     console.error('[Admin] Announce error:', err.message)
     res.status(500).json({ error: err.message })
   }
+})
+
+// ── Admin: past announcement sends, newest first ─────────────────────────────
+app.post('/admin/announce-log', async (req, res) => {
+  if (!isValidAdminSecret(req.headers['x-admin-secret'])) return res.status(403).json({ error: 'Forbidden' })
+  try {
+    const sb = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+    const { data, error } = await sb.from('announcement_log').select('*').order('sent_at', { ascending: false }).limit(30)
+    if (error) return res.json({ sends: [], setupNeeded: true })
+    res.json({ sends: data || [] })
+  } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
 // ── Admin: cancel a subscriber's account ──────────────────────────────────────
