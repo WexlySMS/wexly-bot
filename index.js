@@ -1280,8 +1280,11 @@ app.get('/admin/stats', async (req, res) => {
 // ── Admin: send announcement email to all subscribers ─────────────────────────
 app.post('/admin/announce', async (req, res) => {
   if (!isValidAdminSecret(req.headers['x-admin-secret'])) return res.status(403).json({ error: 'Forbidden' })
-  const { subject, message, filter } = req.body
-  if (!subject || !message) return res.status(400).json({ error: 'Missing subject or message' })
+  const { filter, template, testTo, dryRun } = req.body
+  const winback = template === 'winback' ? require('./src/utils/winbackEmail') : null
+  const subject = req.body.subject || (winback && winback.SUBJECT)
+  const message = req.body.message || ''
+  if (!subject || (!message && !winback)) return res.status(400).json({ error: 'Missing subject or message' })
 
   try {
     const sb = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
@@ -1292,14 +1295,36 @@ app.post('/admin/announce', async (req, res) => {
     if (filter === 'active') query = query.eq('status', 'active')
     else if (filter === 'trial') query = query.eq('status', 'trial')
     else if (filter === 'pro') query = query.eq('plan', 'pro')
+    else if (filter === 'expired') query = query.in('status', ['trial_expired', 'cancelled'])
     else query = query.in('status', ['active', 'trial']) // default: all active
 
-    const { data: businesses } = await query
-    if (!businesses?.length) return res.json({ sent: 0 })
+    const { data: found } = await query
+    // One email per address, valid addresses only.
+    const seen = new Set()
+    let businesses = (found || []).filter(b => {
+      const e = String(b.email || '').trim().toLowerCase()
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e) || seen.has(e)) return false
+      seen.add(e); return true
+    })
+    if (dryRun) return res.json({ wouldSend: businesses.length })
+    // Test send: one copy to the given address, using the first match as sample data.
+    if (testTo) businesses = [{ ...(businesses[0] || { owner_name: 'Alex Rivera', business_name: 'Your Business' }), email: String(testTo).trim() }]
+    if (!businesses.length) return res.json({ sent: 0 })
 
     let sent = 0
     for (const biz of businesses) {
       const firstName = biz.owner_name?.split(' ')[0] || 'there'
+      if (winback) {
+        await sgMail.send({
+          from: 'Wexly <hello@getwexly.com>', replyTo: 'hello@getwexly.com', to: biz.email,
+          subject: (testTo ? '[TEST] ' : '') + subject,
+          headers: { 'List-Unsubscribe': `<${winback.UNSUB}>` },
+          html: winback.winbackHtml({ firstName, businessName: biz.business_name, postalAddress: process.env.WEXLY_MAIL_ADDRESS })
+        })
+        sent++
+        await new Promise(r => setTimeout(r, 100))
+        continue
+      }
       const personalizedMessage = message
         .replace(/\{name\}/g, firstName)
         .replace(/\{business\}/g, biz.business_name)
