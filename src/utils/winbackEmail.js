@@ -105,7 +105,7 @@ function winbackHtml({ firstName, businessName, postalAddress } = {}) {
   <tr><td style="padding:30px 30px 0;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E3F3EA" style="background:#E3F3EA;border-radius:20px;"><tr><td style="padding:24px;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-        <td width="64" valign="top"><img src="https://getwexly.com/icon-192.png" width="52" height="52" alt="Wexly app icon" style="display:block;border-radius:13px;border:0;"></td>
+        <td width="64" valign="top"><img src="https://getwexly.com/app-icon.png" width="52" height="52" alt="Wexly app icon" style="display:block;border-radius:13px;border:0;"></td>
         <td valign="top">
           <div style="font:24px/1.15 ${SERIF};color:${INK};letter-spacing:-0.4px;">The easiest way to run it: the iPhone app.</div>
           <div style="font:16px/1.5 ${SANS};color:#3F5F50;padding-top:5px;">Your calendar, your clients and your commands, one tap away.</div>
