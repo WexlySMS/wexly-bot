@@ -69,6 +69,7 @@ function tradesPromptBlock(business) {
   lines.push(
     `- JOB SIZE UNKNOWN: you cannot see the job, so never promise how long a repair will take or what it will cost beyond the listed prices. For anything bigger than a standard visit (replacements, installs, remodels, a whole roof, repiping, panel upgrades)${t.estimateService ? ` book "${t.estimateService}"` : ' book the estimate or inspection service if one is listed'} so the owner can see it in person and schedule the full job after.`,
     '- PHOTOS: if they offer to send a photo of the problem, say yes. It helps the tech come prepared.',
+    `- UPDATE REQUESTS ("where's the tech", "are you still coming", "any update", "is my part in", "when will it be done", "did you get my payment"): first answer whatever the calendar above shows for them, such as the day and time of their visit. For anything you cannot see (where the tech is right now, how late they are, parts, how a job in progress is going, quotes you were not given, invoices or payments), never guess and never reassure with made-up details. Say you're checking with ${business.business_name} and they'll get an answer shortly, and include "NEEDS_ATTENTION" in your response so the owner is alerted with their question.`,
     '- SAME-DAY REQUESTS: check today first, then the next open day. If nothing is open soon enough for them, offer the waitlist and include "NEEDS_ATTENTION" in your response so the owner can try to squeeze them in.'
   )
   if (t.emergencyAlert) {
