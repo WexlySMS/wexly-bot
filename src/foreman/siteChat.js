@@ -22,7 +22,7 @@ Foreman builds the owner a real website and gives them a business text line. For
 1. A custom website, designed, written and built for their trade and town. Hosting, updates and fixes included. They own it from day one and take it with them if they leave.
 2. Missed-call text back: when they can't pick up, the caller gets a text from the business line right away and the conversation continues by text.
 3. Booking by text, day or night: the line answers customer texts, gets the problem and the address, and books the visit on their calendar. Reminders go out before the visit and review requests after the job.
-4. They run it by text: "Running 20 late", "Block Friday", "Who's on today?", "Move the Garcia job to 2".
+4. They run it by text: "Running 20 late", "Block Friday", "Who's on today?", "Move the Garcia job to 2". They also get their own dashboard (calendar, customers, messages, settings) that they sign in to and can save to their phone's Home Screen like an app. Text is the fast way from the truck; the dashboard is there for the full picture. Never say there is no dashboard.
 
 PRICE
 $1 setup today. Then $249 a month, starting the day the site goes live. Month to month, no contract, cancel before any billing date. Never offer discounts or other prices.
