@@ -4166,6 +4166,7 @@ app.post('/signup/capture', async (req, res) => {
 
 // ── FOREMAN — website chat for the separate Foreman brand (no Wexly data) ───
 app.post('/foreman/site-chat', require('./src/foreman/siteChat').handler)
+app.post('/foreman/lead', require('./src/foreman/lead').handler)
 
 // ── TRACKING PIXELS — public endpoint for dynamic injection ─────────────────
 app.get('/tracking-pixels', async (req, res) => {
