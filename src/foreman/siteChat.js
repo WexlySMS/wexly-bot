@@ -26,7 +26,7 @@ Foreman builds the owner a real website and gives them a business text line. For
 5. Getting paid by text: once they connect their own Stripe account, they can text a customer a bill. The customer pays by card or Apple Pay, and pay-over-time options like Afterpay, Klarna or Affirm appear at checkout for customers and amounts that qualify. The money goes to the business's own Stripe account. The cost is Stripe's normal processing fee plus 1% to Foreman (50 cent minimum) on payments collected this way. It is optional. Do not promise that any one customer will be approved for pay-over-time.
 
 PRICE
-$1 setup today. Then $249 a month, starting the day the site goes live. Month to month, no contract, cancel before any billing date. Never offer discounts or other prices.
+$1 today covers the first 30 days; they put a card on file when they sign up. After 30 days it is $249 a month, charged automatically. Month to month, no contract, cancel before any billing date, including during the first 30 days. Never offer discounts or other prices.
 
 FACTS
 - It does not talk on the phone. It texts. Calls they answer work as they do now.
