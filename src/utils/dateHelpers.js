@@ -214,7 +214,9 @@ function getSlotsByBusinessHours(business, date, existingAppts, serviceDuration,
     // Format 2: named days [{day:'Mon', open:'09:00', close:'17:00'}, ...]
     dayHours = hours.find(h => h.day === dayOfWeek || h.day === dayShort)
     if (!dayHours || (!dayHours.open && dayHours.open !== undefined) || dayHours.closed) return []
-    var openTime = dayHours.open || dayHours.from || '09:00'
+    // `open` is a time string in one saved shape and a true/false flag in the other
+    // ({day, open:true, from, to}, which the hours importer writes). Only a string is a time.
+    var openTime = (typeof dayHours.open === 'string' && dayHours.open) || dayHours.from || '09:00'
     var closeTime = dayHours.close || dayHours.to || '17:00'
   }
 
