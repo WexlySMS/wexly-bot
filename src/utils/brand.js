@@ -17,6 +17,7 @@
 const DOMAIN = 'foremancalls.com'
 const SITE = `https://${DOMAIN}`
 const REFRESH_MS = 5 * 60 * 1000
+const REPLY_TO = process.env.FOREMAN_REPLY_TO || 'brandon@wolfestudiosca.com'
 
 let registry = { numbers: new Set(), emails: new Set(), slugs: [], loadedAt: 0 }
 let loading = null
@@ -116,7 +117,9 @@ function forEmail(msg) {
   const out = { ...rest, from: foremanSender(msg.from) }
   for (const key of ['subject', 'html', 'text']) if (out[key]) out[key] = rebrand(out[key])
   const reply = typeof out.replyTo === 'string' ? out.replyTo : out.replyTo?.email
-  if (reply && /getwexly\.com$/i.test(reply)) out.replyTo = process.env.FOREMAN_REPLY_TO || `hello@${DOMAIN}`
+  // hello@foremancalls.com sends but has no inbox, so replies go to the owner's
+  // own address. A reply-to that already points at a customer or owner is kept.
+  if (!reply || /getwexly\.com$/i.test(reply) || new RegExp('@' + DOMAIN.replace('.', '\\.') + '$', 'i').test(reply)) out.replyTo = REPLY_TO
   return out
 }
 
