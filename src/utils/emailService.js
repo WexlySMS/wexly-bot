@@ -1,4 +1,5 @@
 const sgMail = require('@sendgrid/mail')
+require('./brand').install() // Foreman accounts get Foreman-branded mail; see utils/brand.js
 require('dotenv').config()
 
 if (!process.env.SENDGRID_API_KEY) {
@@ -13,9 +14,9 @@ const FROM_NOREPLY = { email: 'noreply@mail.getwexly.com', name: 'Wexly' }
 const REPLY_TO     = 'hello@getwexly.com'
 const SITE = 'https://getwexly.com'
 
-async function sendEmail({ from, replyTo, to, subject, html }) {
+async function sendEmail({ from, replyTo, to, subject, html, brand }) {
   try {
-    await sgMail.send({ from, replyTo: replyTo || REPLY_TO, to, subject, html })
+    await sgMail.send({ from, replyTo: replyTo || REPLY_TO, to, subject, html, brand })
     console.log(`[Email] Sent "${subject}" to ${to}`)
   } catch (err) {
     console.error(`[Email] Failed "${subject}" to ${to}:`, err.response?.body?.errors || err.message)

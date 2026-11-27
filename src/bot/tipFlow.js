@@ -127,8 +127,8 @@ async function createInvoiceCheckoutSession({ biz, customerName, customerPhone, 
         ? `Thank you for visiting ${biz.business_name}! Your tip is included above.`
         : `Thank you for visiting ${biz.business_name}!` }
     },
-    success_url: `${process.env.SITE_URL || 'https://getwexly.com'}/payment-confirmed.html`,
-    cancel_url: `${process.env.SITE_URL || 'https://getwexly.com'}/payment-cancelled.html`,
+    success_url: `${require('../utils/brand').siteFor(biz)}/payment-confirmed.html`,
+    cancel_url: `${require('../utils/brand').siteFor(biz)}/payment-cancelled.html`,
   }
 
   if (discountCents > 0) {

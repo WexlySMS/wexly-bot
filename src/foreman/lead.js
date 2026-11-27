@@ -51,7 +51,7 @@ async function handler(req, res) {
     const OWNER_PHONE = process.env.FOREMAN_LEAD_PHONE || process.env.OWNER_NOTIFICATION_PHONE
     const jobs = []
     jobs.push(require('../utils/emailService').sendEmail({
-      from: { email: 'hello@getwexly.com', name: 'Foreman leads' }, to: OWNER_EMAIL, subject: headline,
+      brand: 'foreman', from: { email: 'hello@foremancalls.com', name: 'Foreman leads' }, to: OWNER_EMAIL, subject: headline,
       html: `<div style="font:16px/1.5 Helvetica,Arial,sans-serif;color:#0A1640;max-width:480px;"><h2 style="margin:0 0 12px;">${esc(headline)}</h2>${full ? '' : '<p style="color:#4B587A;">They entered a phone number and have not finished the form yet.</p>'}<table cellpadding="6" style="border-collapse:collapse;">${rows.map(r => `<tr><td style="color:#4B587A;">${r[0]}</td><td><b>${esc(r[1])}</b></td></tr>`).join('')}</table><p><a href="sms:+1${lead.phone}">Text them</a> &nbsp; <a href="tel:+1${lead.phone}">Call them</a></p></div>`
     }).catch(e => console.error('[Foreman lead] email failed:', e.message)))
     // Text only on the finished form, so one lead is one text.

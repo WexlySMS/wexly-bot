@@ -91,6 +91,8 @@ async function sendSMS(from, to, body, mediaUrls, opts = {}) {
   // that isn't in the pool fails synchronously (21712) and we fall back to a
   // plain send, logged loudly, instead of a silent carrier bounce.
   const serviceSid = process.env.TWILIO_MESSAGING_SERVICE_SID || null
+  // Foreman lines never mention Wexly (see utils/brand.js). No-op for everyone else.
+  body = await require('./brand').forSms(from, body)
   const base = { to, from, body }
   if (mediaUrls && mediaUrls.length) base.mediaUrl = mediaUrls.slice(0, 10) // Twilio max 10
   const attempt = async (params) => {

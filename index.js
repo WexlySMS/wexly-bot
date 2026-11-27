@@ -2,6 +2,7 @@ require('dotenv').config()
 const express = require('express')
 const cors = require('cors')
 const morgan = require('morgan')
+require('./src/utils/brand').install() // before any mail is sent: Foreman accounts never see the Wexly name
 const { requireAuth, requireBusinessAuth, requireInternalOrBusinessAuth, requireAdmin } = require('./src/middleware/auth')
 
 const { createClient } = require('@supabase/supabase-js')
@@ -3478,7 +3479,7 @@ app.post('/stripe-connect/create-invoice', requireBusinessAuth, async (req, res)
 
   try {
     const { data: biz } = await supabase.from('businesses')
-      .select('stripe_account_id, stripe_account_connected, business_name')
+      .select('stripe_account_id, stripe_account_connected, business_name, pro_settings')
       .eq('id', businessId).maybeSingle()
 
     if (!biz?.stripe_account_connected || !biz?.stripe_account_id)
@@ -3512,8 +3513,8 @@ app.post('/stripe-connect/create-invoice', requireBusinessAuth, async (req, res)
       custom_text: {
         submit: { message: `Thank you for visiting ${biz.business_name}! A tip is optional but always appreciated.` }
       },
-      success_url: `${process.env.SITE_URL || 'https://getwexly.com'}/payment-confirmed.html`,
-      cancel_url: `${process.env.SITE_URL || 'https://getwexly.com'}/payment-cancelled.html`,
+      success_url: `${require('./src/utils/brand').siteFor(biz)}/payment-confirmed.html`,
+      cancel_url: `${require('./src/utils/brand').siteFor(biz)}/payment-cancelled.html`,
     }
 
     // Add discount coupon if applicable
@@ -3547,7 +3548,7 @@ app.post('/stripe-connect/checkout-tip-prompt', requireBusinessAuth, async (req,
 
   try {
     const { data: biz } = await supabase.from('businesses')
-      .select('id, stripe_account_id, stripe_account_connected, business_name, sms_number, tip_prompt_enabled, tip_percentages')
+      .select('id, stripe_account_id, stripe_account_connected, business_name, sms_number, tip_prompt_enabled, tip_percentages, pro_settings')
       .eq('id', businessId).maybeSingle()
 
     if (!biz?.stripe_account_connected || !biz?.stripe_account_id)
@@ -3569,7 +3570,7 @@ app.post('/stripe-connect/create-deposit', requireInternalOrBusinessAuth, async 
 
   try {
     const { data: biz } = await supabase.from('businesses')
-      .select('stripe_account_id, stripe_account_connected, business_name, sms_number')
+      .select('stripe_account_id, stripe_account_connected, business_name, sms_number, pro_settings')
       .eq('id', businessId).maybeSingle()
 
     if (!biz?.stripe_account_connected || !biz?.stripe_account_id)
@@ -3598,8 +3599,8 @@ app.post('/stripe-connect/create-deposit', requireInternalOrBusinessAuth, async 
         metadata: { businessId, appointmentId }
       },
       metadata: { businessId, appointmentId },
-      success_url: `${process.env.SITE_URL || 'https://getwexly.com'}/deposit-confirmed.html`,
-      cancel_url: `${process.env.SITE_URL || 'https://getwexly.com'}/deposit-cancelled.html`,
+      success_url: `${require('./src/utils/brand').siteFor(biz)}/deposit-confirmed.html`,
+      cancel_url: `${require('./src/utils/brand').siteFor(biz)}/deposit-cancelled.html`,
     }, { stripeAccount: biz.stripe_account_id })
 
     // Save link on appointment
@@ -4167,6 +4168,7 @@ app.post('/signup/capture', async (req, res) => {
 // ── FOREMAN — website chat for the separate Foreman brand (no Wexly data) ───
 app.post('/foreman/site-chat', require('./src/foreman/siteChat').handler)
 app.post('/foreman/lead', require('./src/foreman/lead').handler)
+app.post('/foreman/reset', require('./src/foreman/reset').handler)
 
 // ── TRACKING PIXELS — public endpoint for dynamic injection ─────────────────
 app.get('/tracking-pixels', async (req, res) => {
