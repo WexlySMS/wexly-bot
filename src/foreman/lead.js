@@ -30,7 +30,7 @@ function clean(body) {
     phone: digits,
     name: text(body.name, 80), business: text(body.business, 100), trade: text(body.trade, 40),
     email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : '',
-    src: text(body.src, 60), page: text(body.page, 40)
+    src: text(body.src, 60), page: text(body.page, 40), ref: text(body.ref, 16)
   }
 }
 
@@ -44,7 +44,7 @@ async function handler(req, res) {
 
     const full = lead.stage === 'details'
     const headline = full ? `Foreman lead: ${lead.business || lead.name || pretty(lead.phone)}` : `Foreman lead started: ${pretty(lead.phone)}`
-    const rows = [['Phone', pretty(lead.phone)], ['Name', lead.name], ['Business', lead.business], ['Trade', lead.trade], ['Email', lead.email], ['Source', lead.src], ['Page', lead.page]].filter(r => r[1])
+    const rows = [['Phone', pretty(lead.phone)], ['Name', lead.name], ['Business', lead.business], ['Trade', lead.trade], ['Email', lead.email], ['Source', lead.src], ['Page', lead.page], ['Checkout ref', lead.ref]].filter(r => r[1])
     console.log(`[Foreman lead] ${lead.stage} ${lead.phone} ${lead.business} ${lead.trade}`)
 
     const OWNER_EMAIL = process.env.FOREMAN_LEAD_EMAIL || process.env.OWNER_NOTIFICATION_EMAIL || 'hello@getwexly.com'
