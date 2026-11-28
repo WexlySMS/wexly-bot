@@ -253,4 +253,29 @@ async function start(req, res) {
   }
 }
 
-module.exports = { webhook, open, live, start, provision, verified, token, tokenOk }
+// One-time proof that provisioning works end to end without a card. It can only
+// ever make the single fixed test account below, and every email it sends goes to
+// the owner's own inbox. Remove once a real checkout has been seen.
+async function selftest(req, res) {
+  try {
+    const owner = ownerEmail()
+    const at = owner.indexOf('@')
+    const email = `${owner.slice(0, at)}+foremantest${owner.slice(at)}`
+    const id = 'cs_selftest_1'
+    const result = await provision({ id, client_reference_id: '', customer: 'cus_selftest', subscription: 'sub_selftest', payment_status: 'paid',
+      customer_details: { email, name: 'Test Plumber', phone: '+13105550142' } })
+    const { data: biz } = await db().from('businesses').select('id, business_name, user_id, status, plan, missed_call_enabled, pro_settings')
+      .eq('pro_settings->>brand', 'foreman').eq('pro_settings->foreman->>checkout', id).maybeSingle()
+    const out = { result, account: !!biz, name: biz?.business_name, login_linked: !!biz?.user_id, status: biz?.status, missed_call_on: biz?.missed_call_enabled, live: !!biz?.pro_settings?.foreman?.live_at }
+    if (biz) {
+      const magic = await db().auth.admin.generateLink({ type: 'magiclink', email, options: { redirectTo: `${SITE}/app/dashboard.html` } })
+      const rec = await db().auth.admin.generateLink({ type: 'recovery', email, options: { redirectTo: `${SITE}/app/update-password.html` } })
+      out.owner_open_link_ok = !!magic.data?.properties?.action_link && !magic.error
+      out.customer_password_link_ok = !!rec.data?.properties?.action_link && !rec.error
+      out.redirects_to_foreman = String(magic.data?.properties?.redirect_to || '').startsWith(SITE)
+    }
+    res.json(out)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+}
+
+module.exports = { selftest, webhook, open, live, start, provision, verified, token, tokenOk }

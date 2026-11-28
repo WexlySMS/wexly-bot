@@ -4177,6 +4177,7 @@ app.get('/foreman/admin/open', require('./src/foreman/provision').open)
 app.get('/foreman/admin/live', require('./src/foreman/provision').live)
 app.post('/foreman/admin/live', require('./src/foreman/provision').live)
 app.get('/foreman/start', require('./src/foreman/provision').start)
+app.post('/foreman/admin/selftest', require('./src/foreman/provision').selftest)
 
 // ── TRACKING PIXELS — public endpoint for dynamic injection ─────────────────
 app.get('/tracking-pixels', async (req, res) => {
