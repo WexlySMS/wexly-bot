@@ -65,9 +65,17 @@ function isForemanNumber(number) { return registry.numbers.has(digits(number)) }
 
 // Swap every Wexly reference for its Foreman equivalent. Order matters: links
 // and addresses first, the bare name last.
+const FOREMAN_HEADER = `<div style="background:#0A1640;padding:22px 32px;color:#fff;font-family:Helvetica,Arial,sans-serif;font-size:19px;font-weight:800;letter-spacing:.03em;border-bottom:4px solid #FF6B1A;"><img src="${SITE}/logo-email.png" width="28" height="28" alt="" style="vertical-align:middle;margin-right:10px;border-radius:6px;">FOREMAN</div>`
+
 function rebrand(text) {
-  if (typeof text !== 'string' || !/wexly/i.test(text)) return text
+  if (typeof text !== 'string' || !/wex/i.test(text)) return text
   return text
+    // The shared email header: a dark bar with the two-tone wordmark. Swap the whole bar for Foreman's.
+    .replace(/<div style="background:#0F0F0E;padding:32px 40px;text-align:center;">\s*<span[^>]*>Wex<span[^>]*>ly<\/span><\/span>\s*<\/div>/g, FOREMAN_HEADER)
+    // Any other two-tone wordmark, where the name is split across tags.
+    .replace(/Wex<(span|em|i)\b[^>]*>ly<\/\1>/g, 'FOREMAN')
+    // Brand colours on buttons, links and highlights.
+    .replace(/#0D9488|#1A6B4A/gi, '#1740E0').replace(/#4ADE80/gi, '#FF6B1A').replace(/#E8F4EE/gi, '#E6ECFF')
     .replace(/https?:\/\/pay\.getwexly\.com/gi, SITE)
     .replace(/https?:\/\/(?:www\.)?getwexly\.com\/(?:dashboard|admin)\.html[^\s"'<)]*/gi, `${SITE}/app`)
     .replace(/https?:\/\/(?:www\.)?getwexly\.com\/login\.html[^\s"'<)]*/gi, `${SITE}/admin`)
@@ -76,6 +84,9 @@ function rebrand(text) {
     .replace(/(?:www\.)?getwexly\.com/gi, DOMAIN)
     .replace(/Wexly(?: Inc\.)?/g, 'Foreman')
     .replace(/wexly/gi, 'Foreman')
+    .replace(/Foreman — booking by text for your business/g, 'Foreman. Your website and a line that texts back.')
+    .replace(/ — Daily digest/g, ': daily digest')
+    .replace(/\s—\s/g, ', ')
 }
 
 async function forSms(from, body) {
