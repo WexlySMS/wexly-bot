@@ -4170,6 +4170,7 @@ app.post('/signup/capture', async (req, res) => {
 // ── FOREMAN — website chat for the separate Foreman brand (no Wexly data) ───
 app.post('/foreman/site-chat', require('./src/foreman/siteChat').handler)
 app.post('/foreman/lead', require('./src/foreman/lead').handler)
+app.post('/foreman/ev', express.text({ type: 'text/plain', limit: '2kb' }), require('./src/foreman/events').handler)
 app.post('/foreman/reset', require('./src/foreman/reset').handler)
 app.get('/foreman/unsub', require('./src/foreman/followup').unsubscribe)
 app.post('/foreman/stripe-webhook', require('./src/foreman/provision').webhook)
