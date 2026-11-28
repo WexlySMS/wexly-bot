@@ -1,7 +1,7 @@
 // Foreman website leads. Separate brand on this engine; nothing here touches
 // business, customer or session data.
 //
-// POST /foreman/lead  { stage: 'phone' | 'details', phone, name?, business?, trade?, email?, src? }
+// POST /foreman/lead  { stage: 'phone' | 'details' | 'paid', phone, name?, business?, trade?, email?, src?, ref? }
 //
 // A lead is sent to the owner right away by email and text, on the same channels
 // as new-signup alerts. The form posts twice: once with just the phone number
@@ -38,6 +38,12 @@ const pretty = d => `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`
 
 async function handler(req, res) {
   try {
+    // The welcome page reports a finished checkout so the follow-up emails stop.
+    if (req.body?.stage === 'paid') {
+      if (!allowed(req.ip || 'unknown')) return res.status(429).json({ error: 'slow_down' })
+      await require('./followup').markPaid(req.body.ref).catch(e => console.error('[Foreman lead] paid mark failed:', e.message))
+      return res.json({ ok: true })
+    }
     const lead = clean(req.body)
     if (!lead) return res.status(400).json({ error: 'bad_request' })
     if (!allowed(req.ip || 'unknown')) return res.status(429).json({ error: 'slow_down' })
@@ -50,6 +56,8 @@ async function handler(req, res) {
     const OWNER_EMAIL = process.env.FOREMAN_LEAD_EMAIL || process.env.OWNER_NOTIFICATION_EMAIL || 'hello@getwexly.com'
     const OWNER_PHONE = process.env.FOREMAN_LEAD_PHONE || process.env.OWNER_NOTIFICATION_PHONE
     const jobs = []
+    // Kept so unfinished signups can be followed up; a storage problem never blocks the alert.
+    jobs.push(require('./followup').store(lead).catch(e => console.error('[Foreman lead] not stored:', e.message)))
     jobs.push(require('../utils/emailService').sendEmail({
       brand: 'foreman', from: { email: 'hello@foremancalls.com', name: 'Foreman leads' }, to: OWNER_EMAIL, subject: headline,
       html: `<div style="font:16px/1.5 Helvetica,Arial,sans-serif;color:#0A1640;max-width:480px;"><h2 style="margin:0 0 12px;">${esc(headline)}</h2>${full ? '' : '<p style="color:#4B587A;">They entered a phone number and have not finished the form yet.</p>'}<table cellpadding="6" style="border-collapse:collapse;">${rows.map(r => `<tr><td style="color:#4B587A;">${r[0]}</td><td><b>${esc(r[1])}</b></td></tr>`).join('')}</table><p><a href="sms:+1${lead.phone}">Text them</a> &nbsp; <a href="tel:+1${lead.phone}">Call them</a></p></div>`

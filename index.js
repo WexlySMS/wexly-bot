@@ -3997,6 +3997,7 @@ const server = app.listen(PORT, () => {
   `)
   disableRLS()
   startScheduler()
+  require('./src/foreman/followup').start()
 
   // Verify the session_state column exists — intake/booking flows depend on it.
   ;(async () => {
@@ -4169,6 +4170,7 @@ app.post('/signup/capture', async (req, res) => {
 app.post('/foreman/site-chat', require('./src/foreman/siteChat').handler)
 app.post('/foreman/lead', require('./src/foreman/lead').handler)
 app.post('/foreman/reset', require('./src/foreman/reset').handler)
+app.get('/foreman/unsub', require('./src/foreman/followup').unsubscribe)
 
 // ── TRACKING PIXELS — public endpoint for dynamic injection ─────────────────
 app.get('/tracking-pixels', async (req, res) => {
