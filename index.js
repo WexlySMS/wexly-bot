@@ -59,6 +59,7 @@ app.use(morgan('dev'))
 // 🔒 PROTECTED — See PROTECTED_DECISIONS.md Entry 34. Both webhook paths need this.
 app.use('/stripe/webhook', express.raw({ type: 'application/json' }))
 app.use('/stripe-connect/webhook', express.raw({ type: 'application/json' }))
+app.use('/foreman/stripe-webhook', express.raw({ type: 'application/json' }))
 
 // Everything else gets JSON parsing
 app.use(express.urlencoded({ extended: false }))
@@ -4171,6 +4172,11 @@ app.post('/foreman/site-chat', require('./src/foreman/siteChat').handler)
 app.post('/foreman/lead', require('./src/foreman/lead').handler)
 app.post('/foreman/reset', require('./src/foreman/reset').handler)
 app.get('/foreman/unsub', require('./src/foreman/followup').unsubscribe)
+app.post('/foreman/stripe-webhook', require('./src/foreman/provision').webhook)
+app.get('/foreman/admin/open', require('./src/foreman/provision').open)
+app.get('/foreman/admin/live', require('./src/foreman/provision').live)
+app.post('/foreman/admin/live', require('./src/foreman/provision').live)
+app.get('/foreman/start', require('./src/foreman/provision').start)
 
 // ── TRACKING PIXELS — public endpoint for dynamic injection ─────────────────
 app.get('/tracking-pixels', async (req, res) => {
