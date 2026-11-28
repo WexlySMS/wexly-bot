@@ -51,7 +51,7 @@ function shell(lead, inner) {
   const unsub = `${SITE}/api/foreman/unsub?id=${lead.id}`
   return `<div style="background:#EEF1F7;padding:28px 14px;font-family:Helvetica,Arial,sans-serif;">
   <div style="max-width:480px;margin:0 auto;background:#fff;border-radius:16px;overflow:hidden;">
-    <div style="background:#1740E0;padding:20px 26px;color:#fff;font-size:20px;font-weight:800;">Foreman</div>
+    <div style="background:#0A1640;padding:20px 26px;color:#fff;font-size:19px;font-weight:800;letter-spacing:.03em;border-bottom:4px solid #FF6B1A;"><img src="https://foremancalls.com/logo-email.png" width="28" height="28" alt="" style="vertical-align:middle;margin-right:10px;border-radius:6px;">FOREMAN</div>
     <div style="padding:26px;color:#0A1640;font-size:16px;line-height:1.55;">${inner}
       <p style="margin:24px 0 0;"><a href="${CHECKOUT}?client_reference_id=${esc(lead.ref || '')}" style="display:inline-block;background:#FF6B1A;color:#fff;text-decoration:none;font-weight:700;padding:14px 26px;border-radius:999px;">Start my $1 first month</a></p>
       <p style="margin:18px 0 0;font-size:14px;color:#4B587A;">$1 today, then $249 a month after 30 days. Cancel before then and $1 is all you pay. Questions? Just reply to this email.</p>

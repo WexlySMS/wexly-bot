@@ -31,7 +31,7 @@ const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&a
 function resetHtml(link, businessName) {
   return `<div style="background:#EEF1F7;padding:32px 16px;font-family:Helvetica,Arial,sans-serif;">
   <div style="max-width:460px;margin:0 auto;background:#fff;border-radius:16px;overflow:hidden;">
-    <div style="background:#1740E0;padding:22px 28px;color:#fff;font-size:20px;font-weight:800;">Foreman</div>
+    <div style="background:#0A1640;padding:22px 28px;color:#fff;font-size:19px;font-weight:800;letter-spacing:.03em;border-bottom:4px solid #FF6B1A;"><img src="https://foremancalls.com/logo-email.png" width="28" height="28" alt="" style="vertical-align:middle;margin-right:10px;border-radius:6px;">FOREMAN</div>
     <div style="padding:28px;color:#0A1640;font-size:16px;line-height:1.5;">
       <h1 style="margin:0 0 12px;font-size:22px;line-height:1.2;">Set a new password</h1>
       <p style="margin:0 0 22px;color:#4B587A;">Use the button below to choose a new password${businessName ? ' for ' + esc(businessName) : ''}. The link works once and expires in an hour.</p>
